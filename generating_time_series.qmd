@@ -1,0 +1,1726 @@
+---
+title: "Generating Time Series"
+editor: source
+author: Behrouz Delfanian
+affiliation: University of Luxembourg
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    execute:
+      enabled: true
+engine: knitr
+filters:
+  - webr
+webr:
+  show-editor: true
+  show-startup-message: false
+  autorun: true
+resources:
+  - webr-worker.js
+  - webr-serviceworker.js
+number-sections: true
+message: false
+warning: false
+---
+
+# R environment setting
+
+Installing required libraries
+
+```{r}
+#| label: installing_libraries
+#| cache: true
+#| results: hide
+cran_repo <- "https://ftp.fau.de/cran"
+list_Rpack2use <-
+  c("rmarkdown",
+    "conflicted",
+    "devtools",
+    "knitr",
+    "quarto",
+    "bookdown",
+    #shiny,
+    "DT",
+    "Hmisc",
+    "tidyverse",
+    "magrittr",
+    "lubridate",
+    "hms",
+    "glue",
+    "skimr",
+    "lobstr",
+    "janitor",
+    "zeallot",
+    "stringi",
+    "lemon",
+    "crayon",
+    "jsonlite",
+    #"officer",
+    "tsibble",
+    "fable",
+    "feasts",
+    "imputeTS",
+    "readxl",
+    "slider",
+    "reticulate",
+    "aws.s3",
+    "paws",
+    "RAthena",
+    "botor",
+    "RPostgres",
+    "DBI",
+    "RJDBC",
+    "dbplyr",
+    "arrow",
+    "geosphere",
+    "viridis")
+
+list_installed_packages <- names(installed.packages()[,2])
+for (Rpack in list_Rpack2use) {
+  if (! Rpack %in% list_installed_packages) {
+    print(paste("Installing", Rpack))
+    install.packages(Rpack, repos = cran_repo)
+  } else {
+    print(paste(Rpack, "already installed."))
+  }
+}
+```
+
+Loading librairies
+
+```{r}
+#| label: loading_libraries
+list_Rpack2load_not <-
+  c("conflicted",
+    "devtools",
+    "paws",
+    "RAthena",
+    "botor",
+    "arrow",
+    "RPostgres",
+    "DBI",
+    "RJDBC",
+    "dbplyr",
+    "aws.s3",
+    "arrow",
+    "reticulate",
+    "slider",
+    "stringi",
+    "geosphere",
+    "blah")
+list_Rpack2load <- setdiff(list_Rpack2use, list_Rpack2load_not)
+list_Rpack2load
+```
+
+Resolving function name conflicts
+
+```{r}
+#| label: resolving_conflicts
+for (Rpack in list_Rpack2load) {
+  library(Rpack, character.only = TRUE)
+}
+
+conflicted::conflicts_prefer(pillar::dim_desc)
+conflicted::conflicts_prefer(magrittr::extract)
+conflicted::conflicts_prefer(dplyr::filter)
+conflicted::conflicts_prefer(jsonlite::flatten)
+conflicted::conflicts_prefer(hms::hms)
+conflicted::conflicts_prefer(dbplyr::ident)
+conflicted::conflicts_prefer(lubridate::interval)
+conflicted::conflicts_prefer(dplyr::lag)
+conflicted::conflicts_prefer(readxl::read_xlsx)
+conflicted::conflicts_prefer(magrittr::set_names)
+conflicted::conflicts_prefer(dbplyr::sql)
+conflicted::conflicts_prefer(Hmisc::src)
+conflicted::conflicts_prefer(dplyr::summarize)
+conflicted::conflicts_prefer(magrittr::is_in)
+
+#To pass if interactive
+#rendering <- TRUE
+#time_all <- proc.time()
+
+source("./scripts_gal/misc_funs.R")
+```
+
+
+# Time series overview
+
+
+## What is a time series?
+A **time series** is a sequence of data points recorded over time at **equally spaced intervals** (e.g., daily sales, monthly demand, yearly GDP).  
+It captures the **temporal dynamics** of a process and is central to **forecasting** in supply chains, finance, weather, and many other fields.
+
+
+## Key components
+
+1. **Trend (T)**  
+   - The **long-term** progression of the series (upward, downward, or stable).  
+   - Reflects overall growth, decline, or stagnation.  
+   - *Example:* gradual increase in online sales over years.  
+
+2. **Seasonality (S)**  
+   - *Regular, repeating patterns at fixed periods* (daily, weekly, monthly, yearly).  
+   - *Example:* ice cream sales peaking every summer.  
+
+3. **Cyclic component (C)**  
+   - Long-term oscillations around the trend, often tied to _economic/business_ cycles.  
+   - Unlike seasonality, cycles are **irregular** in **length and amplitude**.  
+   - *Example:* economic boom and recession cycles.  
+
+4. **Irregular / Random (I)**  
+   - Unpredictable, residual variations after accounting for trend, seasonality, and cycles.  
+   - *Example:* sudden demand spikes due to supply chain disruptions.  
+
+
+## Models of time series
+
+- **Additive model:**  
+  $$
+  Y_t = T_t + S_t + C_t + I_t
+  $$  
+  Suitable when **seasonal variations** remain **constant in magnitude**.  
+
+- **Multiplicative model:**  
+  $$
+  Y_t = T_t \times S_t \times C_t \times I_t
+  $$  
+  Suitable when **seasonal variations** change **proportionally** with the level of the series.  
+
+
+## Applications in supply chain
+- **Demand forecasting** → anticipating future _product demand_.  
+- **Inventory control** → optimizing _stock_ based on demand variability.  
+- **Capacity planning** → adjusting _workforce_ or _production_ to meet seasonal/cyclic needs.  
+
+
+# Generating a TS components
+A TS has some **deterministic** components (the “signal”) and some **random** component (the “noise”).\
+
+::: {.callout-tip}
+Usually we want to **extract the signal**, and **model the noise**.\
+:::
+
+Here, since we are generating a TS, we start with some signal and then add the noise.\
+
+## Deterministic component
+
+When building or simulating a time series, it is useful to separate **deterministic components** (signal) from **stochastic components** (noise).
+
+The deterministic part can include:
+
+- **Trend** — a systematic long-term increase or decrease in the series.
+- **Seasonality** — _recurring fluctuations_ tied to the calendar (daily, weekly, yearly, etc.).
+- Other **structural components** — for example, cycles linked to macroeconomic factors.
+
+### Trend component
+We start simple with a linear trend. We’ll be optimistic and assume we have a steady trend of $\alpha= 0.5$ per year starting from a number of units (say thousands of items) of $y_0 = 5$.
+
+#### Linear trend
+
+$$
+tr(t) = y_0 + \alpha*\frac{t}{365}
+$$
+
+#### Exponential trend
+If instead of a linear trend we assume a **constant proportional daily growth rate ($1 + \beta_d$)**, then the trend is exponential. 
+
+After **one day**, the demand’s trend would be $y_0*(1 + \beta_d)$, and after $t$ days, the demand’s trend would be $y_0*(1 + \beta_d)^t$.
+
+The daily growth rate can be derived from the yearly one:
+
+$$
+1 + \beta_d = 1 + \frac{\beta_y}{365} \approx e^{\frac{\beta_y}{365}}
+$$
+
+Consequently:
+
+$$
+tr(t) = y_0*(1 + \beta_d)^t \approx y_0*(e^{\frac{\beta_y}{365}})^t
+$$
+For $\beta_y = 0.1$:
+
+$$
+tr(t) = y_0 * (e^{\frac{0.1}{365}})^t
+$$
+
+
+### Seasonality component
+Seasonality captures **repeated, systematic fluctuations** that recur with a fixed period.\
+
+- Example: retail sales increase every December (yearly seasonality).\
+
+- In our toy model, we assume **only one yearly seasonal effect**.\
+
+- Later, this framework can be extended to **multiple overlapping seasonalities** (e.g., weekly + yearly).
+
+Here, we start with only one yearly seasonality **$s(t)$** (with yearly period).
+
+We smooth the raw seasonal pattern and normalize it so that it has mean zero, ensuring the trend drives the long-run growth.
+
+```{r}
+#| label: seasonality_def_plot
+trend_y <- 0.5
+# yearly trend
+start_ts <- 5
+# starting value of the series
+
+sea_0 <- c(-1, 0, 0, 1, 0, 3, 1, 1, 4, 0, 1, 10)
+# sea_0 contains a seasonal adjustment for each month. 
+# These values represent typical deviations from the trend for each month.
+df_sea <- 
+  tibble(day = seq(as_date("2022-12-28"), today() + days(3), by = "day")) %>%
+  # Generates a daily sequence of dates
+  mutate(mon = month(day),
+         sea = map2_dbl(mon, day, ~ if_else((str_split(.y, pattern = "-") %>% extract2(1) %>% extract(3) %>% as.numeric) == 15, sea_0[.x], NA)),
+         # Map monthly seasonal values to the middle of each month
+         # This creates monthly anchor points for the seasonal component.
+         sea = na_interpolation(sea, option = "spline"),
+         # Interpolate missing seasonal values
+         # Fills in the NA values using spline interpolation, creating a smooth seasonal curve.
+         sea = zoo::rollmean(sea, k = 7, fill = TRUE),
+         # Smooth the seasonal curve further
+         # Applies a 7-day rolling mean to smooth short-term fluctuations.
+         sea = sea - mean(sea)) %>%
+         # Center the seasonal component around zero
+  filter(day >= "2023-01-01",
+         day <= today())
+
+df_sea %>%
+  ggplot(aes(x = day, y = sea)) +
+    geom_hline(yintercept = 0) +
+    geom_line(color = "#00BFC4", size = 0.7) +
+    labs(title = "Seasonality component",
+         y = "Value", x = "Day")
+```
+
+### Additive model
+
+Let’s focus on one item and write $y_t$ for counts of orders for this item, and assume we have daily counts since **January 1st, 2023**, with no missing data.  
+
+We can put together the **trend** and the **seasonality** in an **additive** way to get the time series’ deterministic component:
+
+$$
+y_t^{\text{(d)}} = tr(t) + S(t)
+$$
+
+- With the linear trend\
+
+$$
+tr(t) = y_0 + \alpha*\frac{t}{365}
+$$
+
+
+$$
+S(t) = s(t)
+$$
+
+$$
+y_t^{\text{(d)}} = y_0 + \alpha*\frac{t}{365} + s(t)
+$$
+
+- With the exponential trend\
+
+It would also make sense to **multiply the seasonality by the growth rate**. So, after $t$ days, the deterministic component would be:
+
+$$
+tr(t) = y_0*(e^{\frac{\beta_y}{365}})^t
+$$
+
+$$
+S(t) = s(t)*(e^{\frac{\beta_y}{365}})^t
+$$
+
+$$
+y_t^{\text{(d)}} = (y_0 + s(t))*(e^{\frac{\beta_y}{365}})^t
+$$
+
+For $\beta_y = 0.1$:
+
+
+$$
+y_t^{\text{(d)}} = (y_0 + s(t))*(e^{\frac{0.1}{365}})^t
+$$
+
+#### Plotting the deterministic component
+
+Here we can visualize how the trend and seasonality combine over time to form the deterministic part of the time series.
+
+```{r}
+#| label: deterministic_comp
+df_sea %<>%
+  mutate(tr_lin = start_ts + trend_y * row_number() / 365,
+         tr_exp = start_ts * exp(0.1 / 365)^row_number(),
+         yd_lin = tr_lin + sea,
+         yd_exp = (start_ts + sea) * exp(0.1 / 365)^row_number())
+
+df_sea %>% 
+  pivot_longer(cols = c(tr_lin, tr_exp, yd_lin, yd_exp), 
+               names_to = c("func", "method"), 
+               names_sep = "_", 
+               values_to = "value") %>%
+  mutate(func = factor(func, levels = c("yd", "tr"))) %>%
+  ggplot(aes(x = day, y = value)) +
+    geom_line(aes(color = method,
+                  linetype = func), size = 0.7) +
+    labs(title = "Additive Deterministic Component",
+         y = "Value", x = "Date")
+```
+
+### Multiplicative model
+
+```{r}
+#| label: multiplicative_deterministic_comp
+# Multiplicative deterministic component
+df_sea %<>%
+  mutate(
+    # Linear trend (for comparison)
+    tr_lin = start_ts + trend_y * row_number() / 365,
+    # Exponential trend
+    tr_exp = start_ts * exp(0.1 / 365)^row_number(),
+    
+    # Multiplicative seasonal component
+    yd_lin_mul = tr_lin * (1 + sea),        # linear trend * (1 + seasonality)
+    yd_exp_mul = tr_exp * (1 + sea)         # exponential trend * (1 + seasonality)
+  )
+
+# Reshape for plotting
+df_sea %>% 
+  pivot_longer(
+    cols = c(tr_lin, tr_exp, yd_lin_mul, yd_exp_mul), 
+    names_to = c("func", "method"), 
+    names_sep = "_", 
+    values_to = "value"
+  ) %>%
+  mutate(func = factor(func, levels = c("yd", "tr"))) %>%
+  ggplot(aes(x = day, y = value)) +
+    geom_line(aes(color = method, linetype = func), size = 0.7) +
+    labs(title = "Multiplicative Deterministic Component",
+         y = "Value", x = "Date")
+```
+
+
+## Random component
+So far, we have modeled only the signal. But in reality, time series always contain noise, capturing **unpredictable factors** such as weather, strikes, promotions, or random shocks.
+
+### Gaussain noise
+A simple first assumption is **additive Gaussian noise** with zero mean ($\mu = 0$) and variance $\sigma^2$.
+
+<div style="text-align: center;">
+  <img src="/images/normal_distribution_pdf.png" alt="Poisson Distribution" width="75%">
+</div>
+
+**Distribution:**  
+
+$$
+\epsilon_t \sim \mathcal{N}(0, \sigma^2)
+$$
+
+
+$$
+f(x) = \frac{1}{\sqrt{2\pi\sigma^2}} \, \exp\left(-\frac{x^2}{2\sigma^2}\right)
+$$
+
+**Parameters:** $\mu = 0$, $\sigma^2$
+
+**Mean:** $\mu = 0$
+
+**Variance:** $\sigma^2$
+
+
+```{r}
+#| label: gaussian_noise_added
+sig_1 <- 1
+set.seed(102938)
+df_sea %<>%
+  mutate(noi = rnorm(nrow(df_sea), 0, sig_1),
+         y_lin = yd_lin + noi,
+         y_exp = (start_ts + sea + noi) * exp(0.1 / 365)^row_number())
+```
+
+Let’s start simple and assume we have additive Gaussian noise with mean zero and variance $\sigma ^2 = 1$.\
+Now we have the complete additive time series:
+
+
+And the complete multiplicative time series:
+
+$$
+y(t) = tr(t) + S_t + \epsilon
+$$
+
+And the complete multiplicative time series:
+
+$$
+y(t) = (tr(t) + S_t + \epsilon) * exp(\beta_d * t)
+$$
+```{r}
+#| label: noisy_ts_plot
+df_sea %>% 
+  pivot_longer(cols = c(tr_lin, tr_exp, y_lin, y_exp), 
+               names_to = c("func", "method"), 
+               names_sep = "_", 
+               values_to = "value") %>%
+  mutate(func = factor(func, levels = c("y", "tr"))) %>%
+  ggplot(aes(x = day, y = value)) +
+    geom_hline(yintercept = 0) +
+    geom_line(aes(color = method,
+                  linetype = func),
+                  size = 0.7) +
+    labs(title = "Additive Gaussian Noise",
+         y = "Value", x = "Date")
+```
+
+We see here some negative values. That’s not consistent with counts. Counts are never negative. This means that our model is not quite right. We used Gaussian noise. But **Gaussian noise is unlimited in the positive as well as in the negative**. What other noise distribution can we use?
+
+Since demand is count-based, a more natural choice is a discrete distribution.
+
+### Poisson Noise
+
+Suitable when **variance ≈ mean**.  
+It is simple and widely used for **rare-event counts**.
+
+<div style="text-align: center;">
+  <img src="/images/poisson_distribution_PMF.png" alt="Poisson Distribution" width="75%">
+</div>
+
+**Distribution:**  
+
+$$
+\epsilon_t \sim \mathcal{Poisson}(\lambda)
+$$
+$$
+P(X = k) = \frac{\lambda^k e^{-\lambda}}{k!}, \quad k = 0, 1, 2, \ldots
+$$
+
+**Parameters:** $\lambda$  
+
+**Mean:** $\lambda$  
+
+**Variance:** $\lambda$  
+
+**Notes:**  
+Common in modeling **count data** and **discrete random events** (e.g., photon counts, arrivals, or defect occurrences).
+
+```{r}
+#| label: noisy_ts_poisson_plot
+set.seed(102938)
+lambda <- 2  # mean noise level
+
+df_sea %<>%
+  mutate(noi_pois = rpois(nrow(df_sea), lambda),
+         y_lin_pois = yd_lin + noi_pois,
+         y_exp_pois = (start_ts + sea + noi_pois) * exp(0.1 / 365)^row_number())
+
+df_sea %>% 
+  pivot_longer(cols = c(tr_lin, tr_exp, y_lin_pois, y_exp_pois), 
+               names_to = c("func", "method"), 
+               names_sep = "_", 
+               values_to = "value") %>%
+  mutate(func = factor(func, levels = c("y", "tr"))) %>%
+  ggplot(aes(x = day, y = value)) +
+    geom_hline(yintercept = 0) +
+    geom_line(aes(color = method,
+                  linetype = func),
+                  size = 0.7) +
+    labs(title = "Additive Poisson Noise",
+         y = "Value", x = "Date")
+```
+
+
+### Negative Binomial noise
+When the **variance of counts is larger than the mean**, the Poisson assumption is too restrictive.
+The Negative Binomial distribution **generalizes the Poisson** by introducing an **overdispersion parameter r**.
+
+<div style="text-align: center;">
+  <img src="/images/negative_binomial.png" alt="Negative-Binomial Distribution" width="100%">
+</div>
+
+**Distribution:** 
+
+$$
+\epsilon_t \sim NB(r, p)
+$$
+$$
+P(X = k) = \binom{k + r - 1}{k} (1 - p)^r p^k, \quad k = 0, 1, 2, \ldots
+$$
+
+**Parameters:**  
+- $r > 0$ is the number of successes,  
+- $p \in (0,1)$ is the probability of failure (per trial),  
+- $k$ is the number of failures before achieving $r$ successes.
+
+**Mean:** $\mu = r\frac{1-p}{p}$\  
+
+**Variance:** $\mu + \frac{\mu^2}{r}$, which is **larger than the mean** when r is finite.
+
+This makes it much more flexible than the Poisson for real-world data.
+
+```{r}
+#| label: noisy_ts_negbin_plot
+set.seed(102938)
+size <- 5    # dispersion parameter (higher = closer to Poisson)
+mu   <- 2    # mean of noise
+
+df_sea %<>%
+  mutate(noi_nb = rnbinom(nrow(df_sea), size = size, mu = mu),
+         y_lin_nb = yd_lin + noi_nb,
+         y_exp_nb = (start_ts + sea + noi_nb) * exp(0.1 / 365)^row_number())
+
+df_sea %>% 
+  pivot_longer(cols = c(tr_lin, tr_exp, y_lin_nb, y_exp_nb), 
+               names_to = c("func", "method"), 
+               names_sep = "_", 
+               values_to = "value") %>%
+  mutate(func = factor(func, levels = c("y", "tr"))) %>%
+  ggplot(aes(x = day, y = value)) +
+    geom_hline(yintercept = 0) +
+    geom_line(aes(color = method,
+                  linetype = func),
+                  size = 0.7) +
+    labs(title = "Additive Negative Binomial Noise",
+         y = "Value", x = "Date")
+```
+
+
+### Gamma noise
+Gamma and Log-Normal are popular for modeling **positive continuous noise**—especially when counts or demand cannot be negative and may have **skewness**.
+
+<div style="text-align: center;">
+  <img src="/images/gamma_distribution_pdf.png" alt="Gamma Distribution" width="75%">
+</div>
+
+**Distribution:**  
+
+$$
+f(x; k, \theta) = 
+\frac{1}{\Gamma(k)\,\theta^{k}}\,x^{k - 1} e^{-x / \theta}, 
+\quad x > 0
+$$
+
+**Parameters:** **shape** $k$, **scale** $\theta$, and $\Gamma(k)$ is the Gamma function defined as  
+
+$$
+\Gamma(k) = \int_0^\infty t^{k - 1} e^{-t} dt
+$$
+
+**Mean:**  
+$kθ$
+
+**Variance:**  
+$kθ^2$
+
+**Notes:**  
+Often used for modeling **waiting times** or **non-negative skewed demand**.
+
+```{r}
+#| label: noisy_ts_gamma_plot
+set.seed(102938)
+shape_gamma <- 2
+scale_gamma <- 1
+
+df_sea %<>%
+  mutate(noi_gamma = rgamma(nrow(df_sea), shape = shape_gamma, scale = scale_gamma),
+         y_lin_gamma = yd_lin + noi_gamma,
+         y_exp_gamma = (start_ts + sea + noi_gamma) * exp(0.1 / 365)^row_number())
+
+df_sea %>% 
+  pivot_longer(cols = c(tr_lin, tr_exp, y_lin_gamma, y_exp_gamma), 
+               names_to = c("func", "method"), 
+               names_sep = "_", 
+               values_to = "value") %>%
+  mutate(func = factor(func, levels = c("y", "tr"))) %>%
+  ggplot(aes(x = day, y = value)) +
+    geom_hline(yintercept = 0) +
+    geom_line(aes(color = method,
+                  linetype = func),
+                  size = 0.7) +
+    labs(title = "Additive Gamma Noise",
+         y = "Value", x = "Date")
+```
+
+
+### Log-Normal noise
+
+A **strictly positive**, **skewed** distribution.
+
+<div style="text-align: center;">
+  <img src="/images/log_normal_distribution.png" alt="Log-normal Distribution" width="75%">
+</div>
+
+**Distribution:**  
+
+$$
+f(x; \mu, \sigma) = 
+\frac{1}{x\,\sigma\,\sqrt{2\pi}} 
+\exp\left( -\frac{(\ln x - \mu)^2}{2\sigma^2} \right),
+\quad x > 0
+$$
+
+**Parameters:** log-mean $\mu$, log-standard deviation $\sigma$  
+
+**Mean:**  
+$$
+\ E(X) = exp(\mu + \sigma^2 / 2)
+$$
+
+**Variance:**  
+$$
+Var(X) = (\exp(\sigma^2) - 1) \exp(2\mu + \sigma^2)
+$$
+
+**Notes:**  
+Often used when noise **multiplicatively affects the signal**.
+
+```{r}
+#| label: noisy_ts_lognorm_plot
+set.seed(102938)
+mu_lognorm <- 0
+sigma_lognorm <- 0.3
+
+df_sea %<>%
+  mutate(noi_lognorm = rlnorm(nrow(df_sea), meanlog = mu_lognorm, sdlog = sigma_lognorm),
+         y_lin_lognorm = yd_lin + noi_lognorm,
+         y_exp_lognorm = (start_ts + sea + noi_lognorm) * exp(0.1 / 365)^row_number())
+
+df_sea %>% 
+  pivot_longer(cols = c(tr_lin, tr_exp, y_lin_lognorm, y_exp_lognorm), 
+               names_to = c("func", "method"), 
+               names_sep = "_", 
+               values_to = "value") %>%
+  mutate(func = factor(func, levels = c("y", "tr"))) %>%
+  ggplot(aes(x = day, y = value)) +
+    geom_hline(yintercept = 0) +
+    geom_line(aes(color = method,
+                  linetype = func),
+                  size = 0.7) +
+    labs(title = "Additive Log-Normal Noise",
+         y = "Value", x = "Date")
+```
+
+# TS noise modelling
+
+## Review of the additive model
+
+We re-use the synthetic data from last week, which follows an **additive decomposition** of the form:
+
+$$
+y(t) = tr(t) + s(t) + \epsilon_t
+$$
+
+### Load the data
+
+```{r}
+#| label: load-df-ts1
+data_dir <- "./data"
+fpath_df_ts1 <- glue("{data_dir}/synthetic_TS_01.tsv")
+
+df_ts1 <- 
+  read_tsv(fpath_df_ts1) %>%
+  select(day, mon, sea, tr_lin, yd_lin, noi, y_lin) %>%
+  rename(tr = tr_lin, yd = yd_lin, y = y_lin) %>%
+  mutate(year = year(day)) %>%
+  relocate(year)
+```
+
+### Trend component
+
+The trend is modeled as a linear function of time:
+
+$$
+tr(t) = y_0 + \alpha.\frac{t}{365}
+$$
+We can recover the parameters $y_0$ (intercept) and $\alpha$ (slope) as follows:
+
+```{r}
+#| label: recover-trend-params
+y0_o   <- df_ts1$tr[1] %>% round
+alfa_o <- df_ts1$tr[366] - df_ts1$tr[1]
+```
+
+Hence  
+- $y_0 =$ `r y0_o`.  
+- $\alpha =$ `r alfa_o`
+
+### Seasonal component
+The seasonality is defined by a smooth repeating curve, shown below for the first year:
+
+```{r}
+#| label: plot-sea-actual
+df_ts1 %>%
+  filter(year == min(as.numeric(as.character(year)))) %>%
+  ggplot(aes(x = day, y = sea)) +
+  geom_line() +
+  labs(title = "Seasonal Component (First Year)",
+       x = "Day", y = "Seasonal Effect")
+```
+
+### Original time series
+The full modeled series, including the original Gaussian noise, is shown below:
+
+```{r}
+#| label: plot-df-ts1
+df_ts1 %>% 
+  ggplot(aes(x = day)) +
+  geom_line(aes(y = y), color = "red", alpha = 0.5) +
+  geom_line(aes(y = yd), color = "black") +
+  geom_hline(yintercept = 0) +
+  labs(title = "Synthetic Time Series with Gaussian Noise",
+       x = "Day", y = "Value")
+```
+
+Note that normal noise may be inappropriate for _count-type data_, since it can generate negative forecasts—an issue that motivates the following noise models.
+
+## Noise with constant rate
+Let the noise follow a Poisson distribution with constant rate $\lambda_0 = 2$
+
+Because the Poisson mean equals its variance, we re-center the generated noise to preserve a mean of zero and avoid negative forecasts.
+
+```{r}
+#| label: generate-constant-pois-noise
+set.seed(2831)
+lam_0 <- 2
+
+df_ts1 %<>%
+  mutate(noi_cnst = rpois(n = nrow(.), lambda = lam_0) - min(c(lam_0, min(yd))),
+         y_1 = yd + noi_cnst)
+
+df_ts1 |>
+  ggplot(aes(x = day)) +
+  geom_line(aes(y = y_1), color = "red", alpha = 0.5) +
+  geom_line(aes(y = yd), color = "black") +
+  geom_hline(yintercept = 0) +
+  labs(title = "Time Series with Constant-Rate Poisson Noise",
+       x = "Day", y = "Value")
+```
+
+## Noise with proportional rate
+
+In many real-world processes, **noise magnitude increases with the signal level**. This can be the case for sales, demand, or production volumes, where fluctuations scale with the size of operations.
+
+For example:\
+If one trailer delivery is missed due to a strike when demand is low, a tenfold demand would imply a missed delivery of ten trailers — illustrating proportional noise.
+
+### Additive interpretation
+We can still express the model additively as:
+
+$$
+y(t) = tr(t) + s(t) + \epsilon_t
+$$
+
+where  
+
+$$
+\epsilon_t \sim \mathrm{Pois}(\lambda_t), \quad \lambda_t \propto y_t^{\text{(d)}} = tr(t) + s(t)
+$$
+
+### Multiplicative equivalence
+
+This is equivalent to a multiplicative noise model:
+
+$$
+y(t) = (tr(t) + s(t)).\eta_t
+$$
+where $\eta_t$ is a Poisson-like random multiplier with constant mean.
+ 
+### Implementation
+
+We simulate proportional noise with a constant scaling factor $c_\lambda = 0.4$:
+
+```{r}
+#| label: generate-proportional-pois-noise
+const_lam <- 0.4
+
+set.seed(123098)
+df_ts1 %<>%
+  mutate(lam      = const_lam * yd,
+         noi_prop = map_dbl(lam, ~ rpois(1, lambda = .x) - .x),
+         y_2      = yd + noi_prop)
+
+df_ts1 %>%
+  select(day, yd, y_1, y_2) %>%
+  pivot_longer(
+    cols = c(y_1, y_2),
+    names_to = "method",
+    values_to = "TS_value"
+  ) %>%
+  mutate(method = recode(
+    method,
+    y_1 = "Constant-rate Poisson noise",
+    y_2 = "Proportional-rate Poisson noise"
+  )) %>%
+  ggplot(aes(x = day, y = TS_value)) +
+  geom_line(aes(color = method), alpha = 0.6) +
+  geom_line(aes(y = yd), color = "black") +
+  geom_hline(yintercept = 0) +
+  facet_wrap(~ method, ncol = 1) +
+  labs(
+    title = "Constant vs Proportional Poisson Noise",
+    x = "Day",
+    y = "Value"
+  ) +
+  theme(legend.position = "none")
+```
+
+### Interpretation
+
+- The constant-rate noise adds fluctuations of fixed variance, independent of the signal.
+- The proportional-rate noise scales with the signal amplitude, resembling multiplicative variability commonly seen in business and supply-chain processes.
+
+## Analysis
+
+### Visualizing yearly seasonality
+When we suspect seasonality, such as yearly patterns, it can be insightful to overlay the time series data by year.
+This allows us to visually compare the dynamics of each year and identify recurring seasonal behaviors.
+
+```{r overlay-yearly-ts}
+df_ts1 %<>%
+  mutate(
+    year = factor(year(day)),
+    date_no_year = day
+  ) %>%
+  relocate(c(year, date_no_year), .after = day)
+
+year(df_ts1$date_no_year) <- 0
+
+df_ts1 %>%
+  ggplot(aes(x = date_no_year, y = y_2)) +
+  geom_line(aes(group = year, color = year), alpha = 0.5) +
+  labs(
+    title = "Overlay of Yearly Time Series",
+    x = "Day (within year)",
+    y = "Value",
+    color = "Year"
+  )
+```
+
+We already observe a recurring yearly pattern, especially toward the end of the year.
+This suggests a combination of trend and seasonality in the data, which we now aim to analyze more formally.
+
+###  Trend analysis
+We begin by estimating the trend component, since it represents the longer-term structure of the series.\
+Seasonality can then be analyzed more effectively once the trend has been accounted for.
+
+We compare different **trend modeling** approaches:
+
+- Linear Trend: the simplest baseline model.
+- Nonlinear Trends using flexible smoothers:
+  + LOESS (Locally Weighted Scatterplot Smoothing)
+  + GAM (Generalized Additive Model)
+
+```{r fitting-yearly-trend}
+loess_span_high <- 0.75
+
+df_ts1 %<>%
+  nest(data = -year)  %>%
+  mutate(
+    lm_tr = map(
+      year,
+      ~ lm(y_2 ~ day, data = df_ts1  %>% filter(year == .x))
+    ),
+    loes_tr = map(
+      year,
+      ~ loess(y_2 ~ as.numeric(day),
+              data = df_ts1  %>% filter(year == .x),
+              span = loess_span_high)
+    ),
+    data = map2(data, lm_tr, ~ mutate(.x, try_lm = .y$fitted)),
+    data = map2(data, loes_tr, ~ mutate(.x, try_lo = .y$fitted))
+  )  %>%
+  select(-c(lm_tr, loes_tr))  %>%
+  unnest(data)
+
+df_ts1  %>%
+  ggplot(aes(x = date_no_year, y = y_2)) +
+  geom_line(aes(group = year, color = year), alpha = 0.5) +
+  geom_line(aes(y = try_lm, group = year), color = "blue") +
+  geom_line(aes(y = try_lo, group = year), color = "red") +
+  labs(
+    title = "Yearly Trend Fitting: Linear (Blue) vs LOESS (Red)",
+    x = "Day (within year)",
+    y = "Value",
+    color = "Year"
+  )
+```
+
+Here,
+
+- Blue lines represent the fitted linear trends, and
+- Red curves show the LOESS-smoothed trends (with span = `r loess_span_high`).
+
+We see a reasonable degree of consistency across years, though some discrepancies appear in incomplete years (e.g., 2025).\
+However, analyzing each year independently is not ideal for identifying the overall trend, since the yearly boundaries do not necessarily align smoothly from one year to the next.
+
+#### Continuous trend estimation
+
+To capture a coherent view of the long-term evolution, we re-estimate the trend over the entire time span.
+
+We compare:
+
+- Linear trend (black)
+- LOESS smoothing with:
+  + Medium span (`0.5`) — blue curve
+  + Low span (`0.1`) — red curve
+- GAM smoothing (dark green), with automatic smoothing and confidence bands
+
+```{r plot-overoll-smoothing}
+loess_span_med  <- 0.5
+loess_span_low <- 0.1
+
+lm_tr <- lm(y_2 ~ day, data = df_ts1)
+
+lo_tr_1 <- loess(y_2 ~ as.numeric(day),
+                 data = df_ts1,
+                 span = loess_span_med)
+
+lo_tr_2 <- loess(y_2 ~ as.numeric(day),
+                 data = df_ts1,
+                 span = loess_span_low)
+
+df_ts1 %<>%
+  mutate(
+    tr_lm   = lm_tr$fitted,
+    tr_lo_1 = lo_tr_1$fitted,
+    tr_lo_2 = lo_tr_2$fitted
+  )
+
+df_ts1 %>%
+  ggplot(aes(x = day, y = y_2)) +
+  geom_line(aes(group = year, color = year), alpha = 0.4) +
+  geom_line(aes(y = tr_lm), color = "black", linewidth = 0.8) +
+  geom_line(aes(y = tr_lo_1), color = "blue", linewidth = 0.6) +
+  geom_line(aes(y = tr_lo_2), color = "red", linewidth = 0.6) +
+  geom_smooth(method = "gam", color = "darkgreen", linewidth = 0.7) +
+  labs(
+    title = "Global Trend Estimation with Various Smoothers",
+    x = "Day",
+    y = "Value",
+    color = "Year"
+  )
+
+```
+
+#### Interpretation
+
+- The linear trend (black) provides a clear, interpretable long-term direction and fits the overall data well.
+
+- The LOESS (low span, red) captures short-term fluctuations, overlapping with the seasonal pattern rather than isolating the true trend.
+
+- The LOESS (medium span, blue) and GAM (dark green) curves strike a balance but tend to capture both slow seasonal and trend components simultaneously.
+
+Hence, while linear smoothing suffices to characterize the long-term drift, nonlinear smoothers such as LOESS or GAM can help diagnose residual structure — valuable when refining the decomposition into trend, seasonality, and irregular components.
+
+### Seasonality
+After identifying the trend, the next step is to investigate seasonality.\
+To do this, we can overlay the estimated seasonal curves for each year and look for repeating or shifting patterns.
+
+```{r seasonlity-curve-yoy}
+
+df_ts1 %>%
+  ggplot(aes(x = date_no_year, y = y_2)) +
+    geom_line(aes(group = year, color = year), alpha = 0.5) +
+    geom_line(aes(y = tr_lo_2, color = year, group = year))
+
+```
+
+Indeed, there appears to be a **phase shift** across years — that is, the peaks and troughs of the seasonal pattern occur slightly earlier or later depending on the year.
+
+#### De-trending and centering seasonality
+
+To analyze seasonality more clearly, we should first remove the trend component so that the seasonal variation is centered around zero.\
+This can be done by subtracting the estimated trend from the original time series:
+
+```{r seasonality-minus-trend}
+
+df_ts1 %<>%
+  mutate(y_notr = y_2 - tr_lm)
+
+sea_1 <-
+  loess(df_ts1 %>% mutate(day = as.numeric(day)),
+        formula = y_notr ~ day,
+        span = loess_span_low)
+
+df_ts1 %<>%
+  mutate(sea_lo = sea_1$fitted)
+
+df_ts1 %>%
+  ggplot(aes(x = date_no_year, y = y_2)) +
+    geom_line(aes(group = year, color = year), alpha = 0.5) +
+    geom_line(aes(y = sea_lo, color = year, group = year), linetype = "dashed") +
+    geom_line(aes(y = tr_lm, group = year, color = year)) +
+    geom_hline(yintercept = 0, color = "black")
+```
+
+Once the trend is removed, the seasonal pattern becomes much more evident — confirming the phase shift between years.
+
+### Noise extraction
+
+Having decomposed the time series into trend and seasonality, the remaining residual component represents the noise:
+
+$$
+y(t) = tr(t) + s(t) + \epsilon_t
+$$
+
+```{r remove-trend-season-form-ts}
+
+df_ts1 %<>%
+  mutate(y_noi = y_2 - tr_lm - sea_lo)
+
+df_ts1 %>%
+  ggplot(aes(x = day, y = y_noi)) +
+    geom_line(aes(color = year)) +
+    geom_vline(xintercept = as_date(c("2023-12-31", "2024-12-31"))) +
+    geom_hline(yintercept = 0)
+
+noi_mean <- mean(df_ts1$y_noi)
+noi_var  <- var(df_ts1$y_noi)
+
+```
+
+We find the following centered moments for the noise:
+
+* Mean: `r round(noi_mean, digits = 2)`
+* Var: `r round(noi_var, digits = 2)`
+
+The residuals still exhibit some **heteroscedasticity** — the variance is not constant across time.
+For instance, spikes tend to occur near the end of each year, suggesting a link with the seasonal component.
+
+#### Noise–seasonality interaction
+
+To visualize this interaction, we can overlay the deterministic component (trend + seasonality, shifted to start at zero) onto the noise:
+
+```{r plot-noise-overlay-seas}
+df_ts1 %>%
+  ggplot(aes(x = day, y = y_noi)) +
+    geom_line(aes(color = year)) +
+    geom_line(aes(y = tr_lm + sea_lo - min(tr_lm))) +
+    geom_vline(xintercept = as_date(c("2023-12-31", "2024-12-31"))) +
+    geom_hline(yintercept = 0)
+```
+
+We observe a clear correlation between the amplitude of the noise and the level of the deterministic component, indicating that the noise may be multiplicative rather than purely additive.
+
+#### Noise distribution
+For now, we continue under the additive noise assumption.\
+We visualize the noise distribution and overlay a Poisson density with parameter $\lambda = `r round(noi_var, digits = 2)`$:
+
+```{r plot-noise-histog}
+df_ts1 %>%
+  mutate(noi_pois = dpois(round(y_noi + noi_var), lambda = noi_var)) %>%
+  ggplot(aes(x = y_noi + noi_var)) +
+    geom_histogram(aes(y = after_stat(density)), bins = 100) +
+    geom_line(aes(y = noi_pois), color = "red")
+```
+
+The histogram reveals deviations from the ideal Poisson shape — consistent with the observed heteroscedasticity — reinforcing the idea that a multiplicative noise model could be a better fit for this time series.
+
+### Modeling multiplicative noise
+The previous analysis indicated that the variance of the residuals (noise) increases with the magnitude of the deterministic component — suggesting that the noise is multiplicative rather than additive.
+
+In an additive noise model, we write:
+
+$$
+y(t) = tr(t) + s(t) + \epsilon_t
+$$
+
+In contrast, a multiplicative noise model assumes:
+
+$$
+y(t) = [tr(t) + s(t)]*[1 + \epsilon_t]
+$$
+
+or equivalently,
+
+$$
+\epsilon_t = \frac{y(t) - [tr(t) + s(t)]}{[tr(t) + s(t)]}
+$$
+
+This formulation implies that the magnitude of the fluctuations (noise) scales with the level of the signal — a realistic assumption for many economic and natural time series.
+
+#### Extracting multiplicative noise
+
+Let’s compute the multiplicative residuals based on our fitted deterministic component $tr(t) + s(t)$:
+
+```{r}
+df_ts1 %<>%
+  mutate(
+    y_det  = tr_lm + sea_lo,
+    eps_mul = (y_2 - y_det) / y_det
+  )
+
+df_ts1 %>%
+  ggplot(aes(x = day, y = eps_mul)) +
+    geom_line(aes(color = year)) +
+    geom_vline(xintercept = as_date(c("2023-12-31", "2024-12-31"))) +
+    geom_hline(yintercept = 0)
+```
+
+We can now inspect whether these normalized residuals appear **homoscedastic** (i.e., constant variance) over time.
+If the variance stabilizes, that confirms that the multiplicative model is indeed more appropriate.
+
+#### Analyzing the multiplicative residuals
+
+Compute basic moments of the multiplicative residuals:
+
+```{r}
+noi_mul_mean <- mean(df_ts1$eps_mul)
+noi_mul_var  <- var(df_ts1$eps_mul)
+```
+
+We obtain:
+
+* Mean: `r round(noi_mul_mean, 3)`
+
+* Variance: `r round(noi_mul_var, 3)`
+
+The mean is close to zero, as expected, and the variance is stable across time — confirming that the **scaled residuals are stationary**.
+
+#### Distribution of multiplicative noise
+
+Next, let’s examine whether the multiplicative residuals follow a Poisson, Gaussian, or log-normal distribution.
+
+```{r}
+df_ts1 %>%
+  ggplot(aes(x = eps_mul)) +
+    geom_histogram(aes(y = after_stat(density)), bins = 100, fill = "lightblue") +
+    stat_function(fun = dnorm,
+                  args = list(mean = noi_mul_mean, sd = sqrt(noi_mul_var)),
+                  color = "red", linewidth = 1) +
+    labs(title = "Distribution of Multiplicative Noise",
+         x = expression(epsilon[t]),
+         y = "Density")
+```
+
+The red curve corresponds to a normal distribution fitted with the same mean and variance as the empirical residuals.\
+If the histogram closely follows this curve, the multiplicative noise can be approximated as Gaussian — a common assumption in log-transformed time series models.
+
+#### Alternative representation (log transformation)
+Since multiplicative models can be expressed additively in the logarithmic domain, we can apply a log transformation:
+
+$$
+log(y(t)) = log[tr(t) + s(t)] + log[1 + \epsilon_t]
+$$
+For small noise $(\epsilon_t \ll 1)$, the term $\log(1 + \epsilon_t) \approx \epsilon_t$,\
+so the model becomes approximately additive in log-space.
+
+```{r}
+df_ts1 %<>%
+  mutate(
+    log_y = log(y_2),
+    log_det = log(y_det),
+    log_eps = log_y - log_det
+  )
+
+df_ts1 %>%
+  ggplot(aes(x = day, y = log_eps)) +
+    geom_line(aes(color = year)) +
+    geom_hline(yintercept = 0) +
+    labs(title = "Log-Transformed Residuals (Approx. Additive)",
+         y = expression(log(epsilon[t])))
+```
+
+This transformation stabilizes the variance even further and simplifies future modeling (e.g., ARIMA or state-space models).
+
+We obtain:
+
+* Mean: `r round(mean(df_ts1$log_eps), 3)`
+
+* Variance: `r round(var(df_ts1$log_eps), 3)`
+
+## Modeling wrap-up
+
+### Trend
+We start by comparing the **original** and **inferred** trend parameters.
+
+```{r compare-trend-orig-inferred}
+y0_a   <- lm_tr$coefficients[1] + (df_ts1$day %>% min() %>% as.numeric()) * lm_tr$coefficients[2]
+alfa_a <- lm_tr$coefficients[2] * 365
+
+tribble(
+  ~Trend_Parameter, ~Original, ~Inferred,
+  "y₀",   y0_o,   y0_a,
+  "α",    alfa_o, alfa_a
+)
+```
+
+The inferred trend parameters are close to the original values, indicating that the linear model successfully recovered the overall trend structure.
+
+### Seasonality:
+Next, we compare the original and inferred seasonal components.
+
+```{r compare-season-orig-inferred}
+df_ts1 %>%
+  ggplot(aes(x = day, y = sea)) +
+    geom_line(color = "black", linewidth = 0.8) +
+    geom_line(aes(y = sea_lo), color = "red", linewidth = 0.8, linetype = "dashed") +
+    labs(
+      title = "Comparison of Original and Inferred Seasonality",
+      x = "Day",
+      y = "Seasonal Component"
+    ) +
+    theme_minimal()
+```
+
+Here, the black curve represents the original seasonal pattern, while the red dashed curve shows the inferred seasonality.
+The two align quite well overall, although a small phase shift can be observed — likely due to interactions between trend and noise, or numerical effects in the decomposition.
+
+### Noise
+Finally, we compare the Poisson noise parameter $\lambda_t$:
+
+* Original: $\lambda =$ `r lam_0`
+* Inferred: $\lambda =$ `r round(noi_var, digits = 2)`
+
+The inferred value is somewhat different from the true parameter, which is expected since noise estimation is often sensitive to model specification and the chosen decomposition method.
+
+Still, the inferred variance remains within a reasonable range.\
+
+In the next step, we’ll explore the case with multiplicative noise, which often provides a more realistic representation of many real-world time series.
+
+
+### Additive vs. multiplicative noise
+
+In the additive model, the observed time series is expressed as:
+
+$$
+y_t = tr(t) + s(t) + \varepsilon_t
+$$
+
+where $\varepsilon_t$ represents random fluctuations around the deterministic trend–seasonality structure.
+
+However, if the amplitude of the noise appears to grow or shrink with the level of the signal (as we observed in our plots), a **multiplicative model** may be more appropriate:
+
+$$
+y_t = [tr(t) + s(t)] \times (1 + \varepsilon_t)
+$$
+
+#### Log-transformation
+
+Taking logarithms linearizes the multiplicative model:
+
+$$
+\log(y_t) = \log(tr(t) + s(t)) + \log(1 + \varepsilon_t)
+$$
+
+For small noise ($\varepsilon_t \ll 1$), we can use the approximation:
+
+$$
+\log(1 + \varepsilon_t) \approx \varepsilon_t
+$$
+
+which means the model becomes approximately **additive in log-space**.  
+This transformation stabilizes the variance and often results in more homogeneous residuals.
+
+#### Procedure
+
+To assess whether the multiplicative model is better, we can follow these steps:
+
+1. **Log-transform the series**  
+   $$
+   y'_t = \log(y_t)
+   $$
+
+```{r log-transform}
+df_ts1 <- df_ts1 |>
+  mutate(y_log = log(y_2))
+```
+
+2. **Re-estimate** trend and seasonality using the same LOESS or regression techniques on $y'_t$.
+
+```{r}
+# Trend estimation using linear model
+lm_tr_log <- lm(y_log ~ as.numeric(day), data = df_ts1)
+
+# Trend prediction
+df_ts1 <- df_ts1 |>
+  mutate(tr_log = predict(lm_tr_log))
+
+# Seasonality estimation using LOESS
+sea_log <- loess(y_log - tr_log ~ as.numeric(day),
+                 data = df_ts1,
+                 span = loess_span_low)
+
+df_ts1 <- df_ts1 |>
+  mutate(sea_log = sea_log$fitted)
+```
+
+3. **Extract residuals** in log-space:
+   $$
+   \varepsilon'_t = y'_t - tr'(t) - s'(t)
+   $$
+
+```{r}
+df_ts1 <- df_ts1 |>
+  mutate(eps_log = y_log - tr_log - sea_log)
+```
+
+
+4. **Evaluate residual properties**:
+   - Mean ≈ 0 (centered)
+   - Homoscedasticity (constant variance)
+   - Independence over time
+   - Normality (histogram or QQ-plot)
+
+```{r}
+# Variances of additive and multiplicative residuals
+var_add <- var(df_ts1$y_noi, na.rm = TRUE)
+var_mul <- var(df_ts1$eps_log, na.rm = TRUE)
+
+tribble(~Model, ~Residual_Variance,
+        "Additive", round(var_add, 4),
+        "Multiplicative (log-space)", round(var_mul, 4))
+```
+
+
+5. **Compare fit metrics** between additive and multiplicative models:
+   - Residual variance
+   - AIC / BIC (if fitting parametric trend models)
+   - Predictive performance (e.g., RMSE on holdout data)
+
+```{r}
+df_ts1 |>
+  select(day, eps_log, y_noi) |>
+  pivot_longer(cols = c(y_noi, eps_log),
+               names_to = "model_type",
+               values_to = "residual") |>
+  ggplot(aes(x = day, y = residual, color = model_type)) +
+    geom_line(alpha = 0.6) +
+    geom_hline(yintercept = 0, color = "black") +
+    facet_wrap(~ model_type, ncol = 1, scales = "free_y") +
+    labs(title = "Comparison of Residuals: Additive vs. Multiplicative",
+         x = "Day", y = "Residual", color = "Model Type") +
+    theme(legend.position = "none")
+```
+
+## Real case: Walmart 2010
+
+Having validated our approach on synthetic data, we now test it on **real-world data**.
+
+### Dataset
+
+We extracted data from the Walmart Kaggle competition.  
+Here we focus on **store 2, department 2**.
+
+```{r load-data}
+fpath_tra <- glue("{data_dir}/Walmart/train.csv")
+
+df_tra <- read_csv(fpath_tra) %>%
+  rename_all(tolower) %>%
+  rename(is_holiday = isholiday)
+
+df_tra_2 <- df_tra %>%
+  filter(store == 2, dept == 2)
+```
+
+### Inspecting the training data
+
+```{r restrict-to-1-store-1-dpt}
+df_tra_2 %>%
+  mutate(is_holiday = ifelse(is_holiday, TRUE, NA),
+         store = factor(store)) %>%
+  ggplot(aes(x = date, y = weekly_sales)) + 
+    geom_line(aes(group = store, color = store)) + 
+    geom_vline(data = df_tra %>% filter(is_holiday) %>% distinct(date), 
+               aes(xintercept = date), 
+               color = "grey50", 
+               alpha = 0.5, 
+               linetype = "dashed") + 
+    facet_wrap(~ dept, scale = "free_y") +
+    labs(title = "Weekly Sales: Store 2, Department 2",
+         x = "Date",
+         y = "Weekly Sales")
+```
+
+We can already see seasonal patterns, particularly spikes at the end of each year.
+
+### Year-over-year analysis
+To highlight seasonal effects, we overlay data year-over-year:
+
+```{r add-years}
+df_tra_2 %<>%
+  mutate(year = factor(year(date)),
+         date_no_year = date) %>%
+  relocate(year, .before = date)
+
+year(df_tra_2$date_no_year) <- 0
+
+df_tra_2 %>%
+  ggplot(aes(x = date_no_year, y = weekly_sales, color = year)) +
+    geom_line(alpha = 1) +
+    labs(title = "Year-over-Year Weekly Sales",
+         x = "Day of Year",
+         y = "Weekly Sales")
+```
+
+Seasonality is evident, with noticeable correlations at year-end. Some mid-year dips in 2011 suggest year-specific effects.
+
+### Trend analysis
+**Yearly Trend:**  
+We first estimate the trend within each year, using both linear regression and LOESS smoothing:
+
+```{r add-trend-yoy}
+df_tra_2 %<>%
+  nest(data = -year) %>%
+  mutate(
+    lm_tr  = map(year, ~ lm(df_tra_2 %>% filter(year == .x), formula = weekly_sales ~ date)),
+    loes_tr = map(year, ~ loess(df_tra_2 %>% 
+                                  filter(year == .x) %>%
+                                  mutate(date = as.numeric(date)),
+                                formula = weekly_sales ~ date,
+                                span = loess_span_high)),
+    data    = map2(data, lm_tr, ~ mutate(.x, try_lm = .y$fitted)),
+    data    = map2(data, loes_tr, ~ mutate(.x, try_lo = .y$fitted))
+  ) %>%
+  select(-c(lm_tr, loes_tr)) %>%
+  unnest(data)
+
+df_tra_2 %>%
+  ggplot(aes(x = date_no_year, y = weekly_sales, color = year)) +
+    geom_line(alpha = 1) +
+    geom_line(aes(y = try_lm), linetype = "dashed") +
+    geom_line(aes(y = try_lo), linetype = "longdash") +
+    labs(title = "Yearly Trend: Linear vs. LOESS",
+         x = "Day of Year",
+         y = "Weekly Sales")
+```
+
+The LOESS curves capture more of the seasonal variation than linear trends alone. Notice mid-year dips in 2011 that are not captured perfectly.
+
+**Overall Trend:**  
+Next, we estimate a trend across the entire period:
+
+```{r add-trend-overall}
+lm_tr <- lm(weekly_sales ~ date, data = df_tra_2)
+
+lo_tr <- loess(weekly_sales ~ as.numeric(date), data = df_tra_2, span = loess_span_high)
+
+df_tra_2 %<>%
+  mutate(tr_lm = lm_tr$fitted,
+         tr_lo = lo_tr$fitted)
+
+df_tra_2 %>%
+  ggplot(aes(x = date, y = weekly_sales, color = year)) +
+    geom_line(alpha = 1) +
+    geom_line(aes(y = tr_lo), color = "black") +
+    geom_line(aes(y = tr_lm), color = "black", linetype = "dashed") +
+    labs(title = "Overall Trend: Linear vs. LOESS",
+         x = "Date",
+         y = "Weekly Sales")
+```
+
+Here, the LOESS trend better captures the variability, especially around peaks and troughs, compared to the linear fit.
+
+### Seasonality and noise analysis
+
+#### Step 1: remove overall trend
+We start by subtracting the overall trend (LOESS, with a high span) from the weekly sales to isolate the seasonal component plus noise:
+
+```{r detrend-data}
+df_tra_2 %<>%
+  mutate(weekly_notr = weekly_sales - tr_lo)
+```
+
+
+#### Step 2: estimate seasonality
+We compute a LOESS-smoothed curve on the detrended series to approximate seasonality, setting a **lower span** to capture finer yearly patterns:
+
+```{r}
+sea_lo <- loess(weekly_notr ~ as.numeric(date), data = df_tra_2, span = loess_span_low)
+
+df_tra_2 %<>%
+  mutate(sea_lo = sea_lo$fitted)
+```
+
+#### Step 3: visualize seasonality year-over-year
+
+```{r}
+df_tra_2 %>%
+  ggplot(aes(x = date_no_year, y = weekly_notr, color = year)) +
+    geom_line(alpha = 1) +
+    geom_line(aes(y = sea_lo, group = year), linetype = "dashed") +
+    geom_hline(yintercept = 0, color = "black") +
+    labs(title = "Detrended Weekly Sales: Seasonality (LOESS)",
+         x = "Day of Year",
+         y = "Detrended Sales")
+```
+
+We can now clearly see the yearly seasonal pattern, including spikes around holidays and end-of-year peaks.
+
+#### Step 4: extract noise
+Subtracting the seasonal component from the detrended series gives us the residuals (noise):
+
+```{r}
+df_tra_2 %<>%
+  mutate(weekly_noise = weekly_notr - sea_lo)
+```
+
+#### Step 5: inspect noise properties
+
+```{r}
+noi_mean <- mean(df_tra_2$weekly_noise, na.rm = TRUE)
+noi_var  <- var(df_tra_2$weekly_noise, na.rm = TRUE)
+
+df_tra_2 %>%
+  ggplot(aes(x = weekly_noise)) +
+    geom_histogram(aes(y = after_stat(density)), bins = 100, fill = "lightblue") +
+    geom_vline(xintercept = 0, color = "black") +
+    labs(title = paste0("Histogram of Residual Noise\nMean = ", round(noi_mean,2),
+                        ", Variance = ", round(noi_var,2)),
+         x = "Residual Noise",
+         y = "Density") +
+    theme_minimal()
+```
+
+#### Step 6: overlay noise vs. deterministic component
+
+```{r}
+df_tra_2 %>%
+  ggplot(aes(x = date, y = weekly_noise)) +
+    geom_line(aes(color = year), alpha = 1) +
+    geom_line(aes(y = tr_lo + sea_lo - min(tr_lo)), color = "black") +
+    geom_hline(yintercept = 0, color = "red") +
+    labs(title = "Residual Noise vs. Deterministic Component",
+         x = "Date",
+         y = "Residual Noise") +
+    theme_minimal()
+```
+
+This helps check whether noise amplitude scales with signal, which would indicate multiplicative effects.
+
+#### Step 7: normalize noise by deterministic component
+Compute a relative noise, dividing the residual by the deterministic component (trend + seasonality):
+
+```{r}
+df_tra_2 %<>%
+  mutate(deterministic = tr_lo + sea_lo,
+         rel_noise = weekly_noise / deterministic)
+```
+
+- This gives an approximate multiplicative residual, which should have roughly constant variance if the multiplicative model is appropriate.
+
+- Values are interpretable as “fractional deviation from expected sales.
+
+#### Step 8: compare additive vs. multiplicative noise variance
+
+```{r}
+# Compute standard deviation
+additive_var <- var(df_tra_2$weekly_noise, na.rm = TRUE)
+multiplicative_var <- var(df_tra_2$rel_noise, na.rm = TRUE)
+
+tribble(
+  ~model, ~residual_variance,
+  "Additive", additive_var,
+  "Multiplicative", multiplicative_var
+)
+```
+
+Since the multiplicative variance is smaller, the multiplicative model stabilizes the residuals.
+
+#### Step 9: visualize relative noise over time
+
+```{r}
+df_tra_2 %>%
+  ggplot(aes(x = date, y = rel_noise, color = year)) +
+    geom_line(alpha = 1) +
+    geom_hline(yintercept = 0, color = "black") +
+    labs(title = "Relative (Multiplicative) Residuals",
+         x = "Date",
+         y = "Fractional Residual")
+```
+
+This highlights whether the multiplicative model reduces the amplitude variation over the year.
+
+#### Step 10: histogram and normality check
+
+```{r}
+rel_mean <- mean(df_tra_2$rel_noise, na.rm = TRUE)
+rel_var  <- var(df_tra_2$rel_noise, na.rm = TRUE)
+
+df_tra_2 %>%
+  ggplot(aes(x = rel_noise)) +
+    geom_histogram(aes(y = after_stat(density)), bins = 100, fill = "lightblue") +
+    geom_vline(xintercept = 0, color = "red") +
+    labs(title = paste0("Histogram of Relative Noise\nMean = ", round(rel_mean,2),
+                        ", Variance = ", round(rel_var,2)),
+         x = "Relative Residual",
+         y = "Density")
+```
+
+#### Step 11: log-transform for multiplicative model
+Another way to handle multiplicative noise is to log-transform the data, which converts multiplicative effects into additive ones:
+
+```{r}
+df_tra_2 %<>%
+  mutate(log_weekly = log(weekly_sales),
+         log_tr_lo  = log(tr_lo),
+         log_resid  = log_weekly - log_tr_lo)
+
+df_tra_2 %>%
+  ggplot(aes(x = date, y = log_weekly, color = year)) +
+    geom_line(alpha = 1) +
+    geom_line(aes(y = log_tr_lo), color = "black", linewidth = 0.8) +
+    labs(
+      title = "Log-Transformed Weekly Sales with LOESS Trend",
+      x = "Date",
+      y = "log(Weekly Sales)"
+    )
+```
+
+#### Step 12: examine the log residuals
+Visualize the residuals in log-space to check if they’re roughly centered around zero and stationary.
+
+```{r}
+df_tra_2 %>%
+  ggplot(aes(x = date, y = log_resid, color = year)) +
+    geom_line(alpha = 1) +
+    geom_hline(yintercept = 0, color = "black") +
+    labs(
+      title = "Residuals in Log-Space (Multiplicative Noise)",
+      x = "Date",
+      y = expression(log(epsilon[t]))
+    )
+```
+
+If the multiplicative model is appropriate, the residuals should have:  
+- constant variance over time, and
+- no clear seasonal pattern.
+
+#### Step 13: distribution of log residuals
+Check the shape of the distribution (for normality):
+
+```{r}
+log_resid_mean <- mean(df_tra_2$log_resid, na.rm = TRUE)
+log_resid_var  <- var(df_tra_2$log_resid, na.rm = TRUE)
+
+df_tra_2 %>%
+  ggplot(aes(x = log_resid)) +
+    geom_histogram(aes(y = after_stat(density)), bins = 100, fill = "lightblue") +
+    stat_function(fun = dnorm,
+                  args = list(mean = log_resid_mean, sd = sqrt(log_resid_var)),
+                  color = "red", linewidth = 1) +
+    labs(
+      title = "Distribution of Log Residuals (Multiplicative Model)",
+      x = expression(log(epsilon[t])),
+      y = "Density"
+    )
+```
+
+If the histogram closely follows the red curve (normal fit), the multiplicative model provides a valid Gaussian approximation in log-space.
+
+#### Step 14: quantitative comparison with additive model
+To summarize model performance, compare residual moments and normality:
+
+```{r}
+tribble(
+  ~Criterion, ~Additive_Model, ~Multiplicative_Model,
+  "Mean", round(mean(df_tra_2$weekly_noise, na.rm = TRUE), 4), round(mean(df_tra_2$log_resid, na.rm = TRUE), 4),
+  "Variance", round(var(df_tra_2$weekly_noise, na.rm = TRUE), 4), round(var(df_tra_2$log_resid, na.rm = TRUE), 4),
+  "Shapiro-Wilk p-value",
+  signif(shapiro.test(df_tra_2$weekly_noise)$p.value, 3),
+  signif(shapiro.test(df_tra_2$log_resid)$p.value, 3)
+)
+```
+
+
+

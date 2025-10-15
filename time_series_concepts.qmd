@@ -1,0 +1,128 @@
+---
+title: "Time Series Concepts"
+author: "Behrouz Delfanian"
+affiliation: "University of Luxembourg"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    execute:
+      enabled: true
+engine: knitr
+filters:
+  - webr
+editor: source
+webr:
+  show-editor: true
+  show-startup-message: false
+  autorun: true
+resources:
+  - webr-worker.js
+  - webr-serviceworker.js
+number-sections: true
+message: false
+warning: false
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(forecast)
+library(randomForest)
+```
+
+
+## Mean, median, and mode relationships
+
+```{r}
+lambda <- 3.75
+
+x <- 0:15
+pmf <- dpois(x, lambda)
+
+# Compute central tendency measures
+mean_x <- lambda
+mode_x <- floor(lambda)
+median_x <- qpois(0.5, lambda)
+
+tibble(x, pmf) |>
+  ggplot(aes(x, pmf)) +
+  geom_col(fill = "skyblue") +
+  geom_vline(aes(xintercept = mean_x, color = "Mean"), linewidth = 1.1) +
+  geom_vline(aes(xintercept = median_x, color = "Median"), linewidth = 1.1, linetype = "dashed") +
+  geom_vline(aes(xintercept = mode_x, color = "Mode"), linewidth = 1.1, linetype = "dotted") +
+  scale_color_manual(values = c("Mean" = "red", "Median" = "green", "Mode" = "purple")) +
+  labs(title = paste0("Poisson(", lambda, ") Distribution"),
+       x = "Number of Events (k)",
+       y = "Probability",
+       color = "Statistic") +
+  theme_minimal()
+
+```
+
+
+## Random forest smoother
+
+```{r}
+set.seed(42)
+
+# --- Generate synthetic daily demand (365 days) ---
+t <- 1:365
+trend <- 0.05 * t
+seasonality <- 10 * sin(2 * pi * t / 7)
+noise <- rnorm(365, mean = 0, sd = 5)
+demand <- 100 + trend + seasonality + noise
+
+data <- tibble(
+  Day = t,
+  Demand = demand
+)
+
+# --- 1️⃣ Exponential Smoothing (classical) ---
+exp_model <- ets(data$Demand)
+data <- data |> mutate(ExpSmooth = fitted(exp_model))
+
+# --- 2️⃣ Random Forest Smoothing (ML-based) ---
+# Create lag features (lags 1–7 days)
+data <- data |> mutate(
+  lag1 = lag(Demand, 1),
+  lag2 = lag(Demand, 2),
+  lag3 = lag(Demand, 3),
+  lag4 = lag(Demand, 4),
+  lag5 = lag(Demand, 5),
+  lag6 = lag(Demand, 6),
+  lag7 = lag(Demand, 7)
+) |> drop_na()
+
+rf_model <- randomForest(Demand ~ lag1 + lag2 + lag3 + lag4 + lag5 + lag6 + lag7, data = data)
+data <- data |> mutate(RF_Smooth = predict(rf_model))
+
+# --- Plot comparison ---
+data |>
+  pivot_longer(cols = c(Demand, ExpSmooth, RF_Smooth), names_to = "Method", values_to = "Value") |>
+  ggplot(aes(Day, Value, color = Method)) +
+  geom_line(size = 1) +
+  labs(
+    title = "Comparing Classical vs Machine Learning Smoothing",
+    subtitle = "Random Forest vs Exponential Smoothing on Daily Demand",
+    y = "Demand",
+    x = "Day"
+  ) +
+  theme_minimal()
+```
+
+
+## LOESS
+
+```{webr-r}
+#| message: false
+#| warning: false
+library(ggplot2)
+ggplot(economics, aes(x = date, y = unemploy)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "loess", span = 0.2, color = "blue")
+```
+
