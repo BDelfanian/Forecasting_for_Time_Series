@@ -8,8 +8,10 @@ format:
     toc: true
     toc-depth: 3
     toc-location: left
+    smooth_scroll: true
     code-fold: true
     code-tools: true
+    code-overflow: scroll
     execute:
       enabled: true
 engine: knitr
@@ -60,6 +62,7 @@ list_Rpack2use <-
     "crayon",
     "jsonlite",
     #"officer",
+    "TSA",
     "tsibble",
     "fable",
     "feasts",
@@ -77,7 +80,9 @@ list_Rpack2use <-
     "dbplyr",
     "arrow",
     "geosphere",
-    "viridis")
+    "viridis",
+    "patchwork",
+    "scales")
 
 list_installed_packages <- names(installed.packages()[,2])
 for (Rpack in list_Rpack2use) {
@@ -138,6 +143,7 @@ conflicted::conflicts_prefer(dbplyr::sql)
 conflicted::conflicts_prefer(Hmisc::src)
 conflicted::conflicts_prefer(dplyr::summarize)
 conflicted::conflicts_prefer(magrittr::is_in)
+conflicted::conflicts_prefer(stats::chisq.test)
 
 #To pass if interactive
 #rendering <- TRUE
@@ -1393,6 +1399,15 @@ df_ts1 |>
     theme(legend.position = "none")
 ```
 
+```{r}
+# Define file path
+output_path <- "./data/synthetic_TS_02.tsv"
+
+# Write to TSV
+write_tsv(df_ts1, file = output_path)
+```
+
+
 ## Real case: Walmart 2010
 
 Having validated our approach on synthetic data, we now test it on **real-world data**.
@@ -1722,5 +1737,1383 @@ tribble(
 )
 ```
 
+
+# Frequency analysis of time series
+
+This module explores **frequency analysis** to decompose a time series into its **trend**, **seasonality**, and **noise** components:
+
+$$
+y(t) = \mathrm{tr}(t) + s(t) + \epsilon_t
+$$
+
+Here, $\mathrm{tr}(t)$ represents the trend (long-term behavior), $s(t)$ represents seasonality (periodic patterns), and $\epsilon_t$ represents noise (random fluctuations). Typically, noise exhibits higher frequencies than seasonality, and seasonality has higher frequencies than the trend. This section introduces the **Fourier Transform** to analyze these components in the **frequency domain**.
+
+## Fourier transform
+
+A time series can be represented as a sum of sine and cosine waves **with varying frequencies, amplitudes, and phases**:
+
+$$
+y(t) = x(0) + \sum_{k=1}^{n-1} x(k) \cos(k \omega t + \phi_k)
+$$
+
+where:  
+- $t$ is the **sampling interval** (e.g., 1 day for daily data),  
+- $\omega = \frac{2\pi}{n}$ is the **frequency scaling factor** (for daily data with $n=365$),  
+- $x(k)$ is the amplitude of the $k$-th frequency component,  
+- $\phi_k$ is the phase shift.
+
+This is known as a **cosine transform**. Alternatively, we can use a **complex representation** combining sine and cosine terms:
+
+$$
+y(t) = \sum_{k=0}^{n-1} x(k) e^{ik\omega t}
+$$
+
+where $e^{ik\omega t} = \cos(k\omega t) + i \sin(k\omega t)$, and the coefficients $x(k)$ are computed via the **Fourier Transform**:
+
+$$
+x(k) = \sum_{t=0}^{n-1} y(t) e^{-ik\omega t}
+$$
+
+For a real-valued time series $y(t)$, the Fourier coefficients $x(k)$ are **conjugate symmetric**:
+
+$$
+x(k) = {x(n-k)}
+$$
+
+This ensures the imaginary parts cancel out in the inverse transform, yielding a real-valued time series. The first coefficient, $x(0)$, represents the **mean of the signal**.
+
+## FA of synthetic time series
+
+We begin with a synthetic time series dataset to illustrate Fourier analysis.
+
+### Loading and visualizing the data
+
+```{r}
+fpath_ts2 <- glue("{data_dir}/synthetic_TS_02.tsv")
+df_ts2 <- read_tsv(fpath_ts2)
+df_ts2
+```
+
+The dataset contains the time series $y_2$, trend ($tr(t)$), and deterministic component ($y_d(t) = tr(t) + s(t)$). Let's plot the time series with its trend (blue) and deterministic component (red):
+
+```{r}
+df_ts2 %>%
+  mutate(year = str_replace(year, "$", "-01-01") %>% as_date) %>%
+  ggplot(aes(x = day, y = y_2)) +
+    geom_line() +
+    geom_line(aes(y = tr), color = "blue", linewidth = 0.8) +
+    geom_line(aes(y = yd), color = "red", linewidth = 0.8) +
+    geom_vline(aes(xintercept = year), color = "grey50", linetype = "dashed")
+```
+
+### Computing the Fourier transform
+
+We use the **Fast Fourier Transform (FFT)** to compute the Fourier coefficients, their magnitudes, and phases:
+
+```{r}
+df_ts2 %<>%
+  mutate(fft      = fft(y_2),
+         freq     = 0:(nrow(df_ts2)-1) * 2 * pi / 365,
+         freq_mag = Mod(fft) / nrow(df_ts2),
+         freq_pha = Arg(fft))
+
+df_ts2 %>%
+  select(day, y_2, fft, freq, freq_mag, freq_pha)
+```
+
+The first coefficient ($x(0)$) corresponds to the mean of the signal. For our data, $x(0) \approx$ `r round(mean(df_ts2$y_2, digits = 3))`.
+
+### Plotting frequency magnitudes
+
+We plot the magnitudes of the Fourier coefficients to **identify dominant frequencies**:
+
+```{r}
+thresh_mag <- 0.14
+
+df_ts2 %>%
+  ggplot(aes(x = freq, y = freq_mag)) +
+    geom_line() +
+    geom_vline(xintercept = mean(df_ts2$freq), color = "blue", linewidth = 0.8) +
+    geom_hline(yintercept = thresh_mag, color = "red", linewidth = 0.8) +
+    ylim(NA, 1)
+```
+
+The plot shows symmetry due to the real-valued nature of the time series. Alternatively, we can use the `periodogram()` function from the `TSA` package in R to compute the same:
+
+```{r}
+periodogram(df_ts2$y_2)
+```
+
+**Dominant frequencies** appear at the **lower end**, corresponding to **trend and seasonality**.
+
+### Thresholding and inverse Fourier transform
+
+We threshold the Fourier coefficients by setting those with magnitudes below `thresh_mag = 0.14` to zero, then apply the inverse Fourier transform to recover the signal:
+
+```{r}
+df_ts2 %<>%
+  mutate(fft_hi  = if_else(freq_mag > thresh_mag, fft, 0),
+         pha_hi  = if_else(freq_mag > thresh_mag, freq_pha, 0),
+         fft_lo  = if_else(freq_mag <= thresh_mag, fft, 0),
+         fft_max = ifelse(row_number() %in% c(1, 2, nrow(df_ts2)), freq_mag, 0),
+         y_hi    = fft(fft_hi, inverse = TRUE),
+         y_lo    = fft(fft_lo, inverse = TRUE),
+         y_max   = fft(fft_max, inverse = TRUE))
+```
+
+Verify that the recovered signal is real (imaginary parts are negligible):
+
+```{r}
+df_ts2 %>% 
+  select(y_2, y_hi) %>% 
+  mutate(im_hi = Im(y_hi)) %>% 
+  count(im_hi)
+```
+
+Now, we scale the high-frequency component to match the seasonality ($sea$) and plot:
+
+```{r}
+df_ts2 %<>%
+  mutate(y_hi = Re(y_hi),
+         y_lo = Re(y_lo),
+         y_max = Re(y_max),
+         y_hi = y_hi - mean(y_hi),
+         y_hi = y_hi / max(abs(y_hi)) * max(abs(sea)))
+
+df_ts2 %>%
+  mutate(year = str_replace(year, "$", "-01-01") %>% as_date) %>%
+  ggplot(aes(x = day, y = y_hi)) +
+    geom_line(color = "red", linewidth = 0.8) +
+    geom_line(aes(y = sea), color = "black") +
+    geom_vline(aes(xintercept = year), color = "grey50", linetype = "dashed")
+```
+
+
+### Analyzing noise
+
+The low-magnitude frequencies represent noise. Let's plot them:
+
+```{r}
+df_ts2 %>%
+  ggplot(aes(x = day, y = y_lo)) + 
+    geom_line()
+```
+
+Compute the mean and variance of the noise:
+
+```{r}
+mean_y_lo <- mean(df_ts2$y_lo)
+var_y_lo <- var(df_ts2$y_lo)
+cat("Mean:", mean_y_lo, "\nVariance:", var_y_lo)
+```
+
+
+
+
+
+**Homework 2**: Can we recover a Poisson-like noise distribution from the synthetic data? Investigate whether scaling is needed and estimate the Poisson parameter. Plot the histogram of \(y_lo\) and overlay a Poisson distribution.
+
+### Phase analysis
+
+We plot the phases for high-amplitude frequencies (first half of the data):
+
+```{r}
+df_ts2 %>%
+  filter(row_number() <= nrow(df_ts2) / 2, freq_mag > thresh_mag) %>%
+  ggplot(aes(x = freq, y = pha_hi)) +
+    geom_line() +
+    geom_point() +
+    geom_hline(yintercept = 0)
+```
+
+To analyze **phase shifts across years**, consider extracting seasonality for each year and comparing **phases of dominant frequencies**.
+
+## Auto-correlation
+
+Auto-correlation measures the **correlation of the time series with itself at different lags**:
+
+```{r}
+acf_ts2 <- acf(df_ts2$y_2, lag.max = nrow(df_ts2)/2, plot = TRUE)
+
+df_acf <- tibble(lag = acf_ts2$lag[,1,1],
+                 acf = acf_ts2$acf[,1,1])
+
+lag_year <-
+  df_acf %>%
+  filter(lag > 100) %>%
+  filter(acf < max(acf) + 0.01,
+         acf > max(acf) - 0.01) %>%
+  extract2("lag") %>% 
+  mean
+
+df_acf %>% 
+  filter(lag > 340,
+         lag < 430) %>%
+  ggplot(aes(x = lag, y = acf)) +
+    geom_line() +
+    geom_vline(xintercept = lag_year, color = "red", linewidth = 0.8)
+```
+
+This helps **identify the periodicity** (e.g., yearly cycles).
+
+## Real-life data
+
+We now apply Fourier analysis to real-world supply chain data from Walmart.
+
+### Loading and Visualizing the Data
+
+```{r}
+fpath_tra <- glue("{data_dir}/Walmart/train.csv")
+df_tra <- read_csv(fpath_tra) %>% 
+  rename_all(tolower) %>% 
+  rename(is_holiday = isholiday)
+
+df_tra_2 <- df_tra %>% 
+  filter(dept == 2, store == 2) %>%
+  rename(ws = weekly_sales, is_hday = is_holiday)
+
+df_tra_2 %>%
+  ggplot(aes(x = date, y = ws)) +
+    geom_smooth(method = "lm", se = FALSE) +
+    geom_line()
+```
+
+### Smoothing analysis
+
+#### Trend
+
+The linear trend may not capture non-linear patterns (e.g., a dip in 2011). We first remove the linear trend and then fit a LOESS smoother with a high span ($span = 0.7$):
+
+```{r}
+loess_span_hi <- 0.70
+
+lm_tr <- lm(ws ~ date, data = df_tra_2)
+df_tra_2 %<>%
+  mutate(tr_lm = lm_tr$fitted,
+         ws_1  = ws - tr_lm)
+
+lo_tr_1 <- loess(ws_1 ~ as.numeric(date), data = df_tra_2, span = loess_span_hi)
+df_tra_2 %<>%
+  mutate(tr_lo_1 = lo_tr_1$fitted,
+         ws_2  = ws_1 - tr_lo_1)
+
+df_tra_2 %>%
+  ggplot(aes(x = date, y = ws_1)) +
+    geom_line() +
+    geom_line(aes(y = tr_lo_1), color = "red", linewidth = 0.8)
+```
+
+#### Seasonality
+
+We fit a LOESS smoother with a lower span ($span = 0.1$) to capture seasonality:
+
+```{r}
+loess_span_lo <- 0.1
+
+lo_tr_2 <- loess(ws_2 ~ as.numeric(date), data = df_tra_2, span = loess_span_lo)
+df_tra_2 %<>%
+  mutate(tr_lo_2 = lo_tr_2$fitted,
+         ws_3    = ws_2 - tr_lo_2)
+
+df_tra_2 %>%
+  ggplot(aes(x = date, y = ws_2)) +
+    geom_line() +
+    geom_line(aes(y = tr_lo_2), color = "red", linewidth = 0.8)
+```
+
+### Fourier analysis
+
+We compute the Fourier transform for the real-life data:
+
+```{r}
+df_tra_2 %<>%
+  mutate(fft_ws   = fft(ws),
+         freq     = 0:(nrow(df_tra_2)-1) * 2 * pi / 365,
+         freq_mag = Mod(fft_ws) / nrow(df_ts2),
+         freq_pha = Arg(fft_ws))
+
+df_tra_2 %>%
+  ggplot(aes(x = freq, y = freq_mag)) +
+  geom_line() +
+  ylim(NA, 150)
+```
+
+The `periodogram` is more complex due to weekly data, where **noise and seasonality frequencies are less distinct than in daily data**.
+
+We separate frequencies into three groups:  
+- **Lowest frequency**: Trend/cycle.  
+- **Low frequencies**: Seasonality.  
+- **High frequencies**: Noise.
+
+```{r}
+thresh_mag_ws <- 120
+
+freq_last_lof <- df_tra_2 %>%
+  filter(row_number() < nrow(df_tra_2) / 2, freq_mag >= thresh_mag_ws) %>%
+  pull(freq) %>%
+  last
+
+idx_last_lof <- which(df_tra_2$freq == freq_last_lof)
+n_tra_2 <- nrow(df_tra_2)
+
+list_idx_minf <- c(1, 2, n_tra_2)
+list_idx_lof <- c(1:idx_last_lof, (n_tra_2 - idx_last_lof + 2):n_tra_2) %>%
+  setdiff(list_idx_minf) %>%
+  union(1) %>%
+  sort
+list_idx_hif <- c(1, (idx_last_lof + 1):(n_tra_2 - idx_last_lof + 1))
+
+df_tra_2 %<>%
+  mutate(fft_lof  = if_else(row_number() %in% list_idx_lof, fft_ws, 0),
+         fft_hif  = if_else(row_number() %in% list_idx_hif, fft_ws, 0),
+         fft_minf = if_else(row_number() %in% list_idx_minf, fft_ws, 0),
+         ws_lof   = fft(fft_lof, inverse = TRUE),
+         ws_hif   = fft(fft_hif, inverse = TRUE),
+         ws_minf  = fft(fft_minf, inverse = TRUE))
+
+df_tra_2 %<>%
+  mutate(ws_lof  = Re(ws_lof),
+         ws_hif  = Re(ws_hif),
+         ws_minf = Re(ws_minf))
+```
+
+#### Trend/cycle
+
+Compare the LOESS trend (red) with the lowest-frequency component (blue):
+
+```{r}
+df_tra_2 %<>%
+  mutate(ws_minf = (ws_minf - mean(ws_minf)) / sd(ws_minf) * 1200)
+
+df_tra_2 %>%
+  ggplot(aes(x = date, y = ws_1)) +
+    geom_line() +
+    geom_line(aes(y = tr_lo_1), color = "red", linewidth = 0.8) +
+    geom_line(aes(y = ws_minf), color = "blue")
+```
+
+#### Seasonality
+
+Compare the LOESS seasonality (red) with the low-frequency component (blue):
+
+```{r}
+df_tra_2 %>%
+  ggplot(aes(x = date, y = ws_2)) +
+    geom_line() +
+    geom_line(aes(y = tr_lo_2), color = "red") +
+    geom_line(aes(y = ws_lof), color = "blue")
+```
+
+#### Noise
+
+Analyze the high-frequency component:
+
+```{r}
+df_tra_2 %<>%
+  mutate(ws_hif = (ws_hif - median(ws_hif)) / sd(ws_hif))
+
+df_tra_2 %>%
+  ggplot(aes(x = date, y = ws_hif)) +
+    geom_line()
+
+df_tra_2 %>%
+  ggplot(aes(x = ws_hif)) +
+    geom_histogram() +
+    geom_vline(xintercept = 0, color = "red")
+```
+
+## Homeworks
+
+### Homework 1: De-trending Before FFT Analysis
+
+The goal is to investigate whether de-trending the synthetic time series \( y_2(t) \) before applying the Fast Fourier Transform (FFT) improves the separation and recovery of the seasonality component. We will:
+1. Remove the trend (\(\mathrm{tr}\)) from \( y_2(t) \) to obtain a de-trended series.
+2. Perform Fourier analysis on the de-trended series.
+3. Compare the recovered seasonality with the original seasonality (\(\mathrm{sea}\)) from the dataset.
+
+#### Step 1: Load and De-trend the Time Series
+
+We start by loading the synthetic time series data and subtracting the trend component (\(\mathrm{tr}\)) from \( y_2 \).
+
+```{r}
+# Load the data
+fpath_ts2 <- glue("{data_dir}/synthetic_TS_02.tsv")
+df_ts2 <- read_tsv(fpath_ts2)
+
+# De-trend the time series
+df_ts2 %<>%
+  mutate(y_detrended = y_2 - tr)
+```
+
+The de-trended series \( y_\text{detrended} = y_2 - \mathrm{tr} \) should primarily contain seasonality (\(\mathrm{sea}\)) and noise (\(\epsilon\)).
+
+#### Step 2: Visualize the De-trended Time Series
+
+Let's plot the de-trended series alongside the original seasonality to visually inspect the effect of de-trending:
+
+```{r}
+df_ts2 %>%
+  mutate(year = str_replace(year, "$", "-01-01") %>% as_date) %>%
+  ggplot(aes(x = day, y = y_detrended)) +
+    geom_line(color = "blue") +
+    geom_line(aes(y = sea), color = "black") +
+    geom_vline(aes(xintercept = year), color = "grey50", linetype = "dashed") +
+    labs(title = "De-trended Time Series vs. Original Seasonality",
+         x = "Day", y = "Value")
+```
+
+This plot helps us confirm that the de-trended series resembles the seasonality component, with noise superimposed.
+
+#### Step 3: Fourier Analysis on De-trended Series
+
+We apply the FFT to the de-trended series, compute the frequency magnitudes and phases, and threshold the coefficients to isolate seasonality.
+
+```{r}
+# Compute FFT on de-trended series
+df_ts2 %<>%
+  mutate(fft_detrended = fft(y_detrended),
+         freq = 0:(nrow(df_ts2)-1) * 2 * pi / 365,
+         freq_mag_detrended = Mod(fft_detrended) / nrow(df_ts2),
+         freq_pha_detrended = Arg(fft_detrended))
+
+# Plot frequency magnitudes
+thresh_mag <- 0.14
+
+df_ts2 %>%
+  ggplot(aes(x = freq, y = freq_mag_detrended)) +
+    geom_line() +
+    geom_hline(yintercept = thresh_mag, color = "red") +
+    ylim(NA, 1) +
+    labs(title = "Frequency Magnitudes of De-trended Time Series",
+         x = "Frequency", y = "Magnitude")
+```
+
+The threshold (\(\text{thresh_mag} = 0.14\)) is reused from the original analysis for consistency. We expect the frequency spectrum to show prominent peaks corresponding to seasonal frequencies, with the trend-related low frequencies diminished.
+
+#### Step 4: Thresholding and Inverse Fourier Transform
+
+We threshold the Fourier coefficients to retain only those with magnitudes above \(\text{thresh_mag}\), which should correspond to seasonality, and compute the inverse FFT to recover the seasonality component:
+
+```{r}
+df_ts2 %<>%
+  mutate(fft_hi_detrended = if_else(freq_mag_detrended > thresh_mag, fft_detrended, 0),
+         pha_hi_detrended = if_else(freq_mag_detrended > thresh_mag, freq_pha_detrended, 0),
+         y_hi_detrended = fft(fft_hi_detrended, inverse = TRUE))
+
+# Verify the recovered signal is real
+df_ts2 %>%
+  select(y_detrended, y_hi_detrended) %>%
+  mutate(im_hi_detrended = Im(y_hi_detrended)) %>%
+  count(im_hi_detrended)
+```
+
+The imaginary parts should be negligible, confirming a real-valued recovered signal.
+
+#### Step 5: Scale and Compare Recovered Seasonality
+
+We scale the recovered seasonality (\(\mathrm{y_hi_detrended}\)) to match the amplitude of the original seasonality (\(\mathrm{sea}\)) and plot them for comparison:
+
+```{r}
+df_ts2 %<>%
+  mutate(y_hi_detrended = Re(y_hi_detrended),
+         y_hi_detrended = y_hi_detrended - mean(y_hi_detrended),
+         y_hi_detrended = y_hi_detrended / max(abs(y_hi_detrended)) * max(abs(sea)))
+
+df_ts2 %>%
+  mutate(year = str_replace(year, "$", "-01-01") %>% as_date) %>%
+  ggplot(aes(x = day, y = y_hi_detrended)) +
+    geom_line(color = "red", aes(linetype = "Recovered Seasonality")) +
+    geom_line(aes(y = sea), color = "black", linetype = "solid") +
+    geom_vline(aes(xintercept = year), color = "grey50", linetype = "dashed") +
+    labs(title = "Recovered Seasonality (De-trended) vs. Original Seasonality",
+         x = "Day", y = "Value") +
+    scale_linetype_manual(name = "Component", values = c("Recovered Seasonality" = "dashed", "solid" = "solid"))
+```
+
+#### Step 6: Comparison with Original Analysis
+
+In the original analysis (without de-trending), the FFT was applied directly to \( y_2 \), which included the trend. The trend contributes low-frequency components that may overlap with seasonal frequencies, potentially complicating the separation of seasonality and noise. By removing the trend first, we expect:
+- **Cleaner frequency spectrum**: Low-frequency components associated with the trend are eliminated, making seasonal frequencies more distinct.
+- **Improved seasonality recovery**: The thresholding process should better isolate seasonal frequencies, leading to a recovered seasonality (\(\mathrm{y_hi_detrended}\)) that more closely matches \(\mathrm{sea}\).
+- **Reduced noise interference**: Noise frequencies are less likely to be confounded with trend-related frequencies.
+
+To quantify the improvement, we compute the mean squared error (MSE) between the recovered seasonality and the original seasonality for both approaches:
+
+```{r}
+# MSE for de-trended analysis
+mse_detrended <- mean((df_ts2$y_hi_detrended - df_ts2$sea)^2)
+
+# MSE for original analysis (using y_hi from original analysis)
+mse_original <- mean((df_ts2$y_hi - df_ts2$sea)^2)
+
+cat("MSE (De-trended):", mse_detrended, "\nMSE (Original):", mse_original)
+```
+
+#### Conclusion
+
+De-trending the time series before applying the FFT likely improves the results if the MSE for the de-trended analysis is lower than that for the original analysis. This suggests better separation of the seasonality component, as the trend's low-frequency components no longer interfere with the Fourier analysis. The visual comparison in the plot should show that the recovered seasonality (\(\mathrm{y_hi_detrended}\)) aligns more closely with \(\mathrm{sea}\) in terms of amplitude and phase, especially if the trend was a significant component in the original series.
+
+**Key Observations**:
+- If the trend is strong, de-trending reduces the amplitude of low-frequency components in the FFT, making it easier to isolate seasonal frequencies.
+- The threshold (\(\text{thresh_mag} = 0.14\)) may need adjustment for the de-trended series, as the frequency magnitudes are scaled differently without the trend.
+- If the MSE is similar or higher, it may indicate that the trend was not a significant factor, or the thresholding process needs optimization.
+
+**Recommendation**: Adjust the threshold \(\text{thresh_mag}\) for the de-trended series if the recovered seasonality does not align well with \(\mathrm{sea}\). Experiment with values around 0.14 to optimize the separation of seasonality and noise.
+
+### Homework 2: Recovering a Poisson-like Noise Distribution from Synthetic Data
+
+The goal is to determine whether the noise component (\( y_lo \)) from the synthetic time series can be modeled as a Poisson distribution. We will:
+1. Analyze the noise component (\( y_lo \)) obtained from the Fourier analysis.
+2. Investigate whether scaling is needed to make \( y_lo \) resemble a Poisson distribution.
+3. Estimate the Poisson parameter (\(\lambda\)).
+4. Plot the histogram of \( y_lo \) with an overlaid Poisson distribution.
+
+#### Step 1: Load and Extract Noise Component
+
+We assume the synthetic time series dataset has been processed as in the original course material, where \( y_lo \) represents the noise component obtained by thresholding the Fourier coefficients with \(\text{thresh_mag} = 0.14\). If not already computed, we include the relevant code:
+
+```{r}
+# Load the data
+fpath_ts2 <- glue("{data_dir}/synthetic_TS_02.tsv")
+df_ts2 <- read_tsv(fpath_ts2)
+
+# Compute FFT and threshold to extract noise
+df_ts2 %<>%
+  mutate(fft = fft(y_2),
+         freq = 0:(nrow(df_ts2)-1) * 2 * pi / 365,
+         freq_mag = Mod(fft) / nrow(df_ts2),
+         freq_pha = Arg(fft),
+         fft_lo = if_else(freq_mag <= 0.14, fft, 0),
+         y_lo = Re(fft(fft_lo, inverse = TRUE)))
+
+# Plot the noise component
+df_ts2 %>%
+  ggplot(aes(x = day, y = y_lo)) +
+    geom_line() +
+    labs(title = "Noise Component (y_lo)", x = "Day", y = "Value")
+```
+
+The noise component \( y_lo \) represents the high-frequency residuals after removing the trend and seasonality via Fourier thresholding.
+
+#### Step 2: Analyze the Noise Distribution
+
+A Poisson distribution models count data and has the following properties:
+- Non-negative integer values.
+- Mean equals variance (\(\lambda = \text{mean} = \text{variance}\)).
+- Probability mass function: \( P(X = k) = \frac{\lambda^k e^{-\lambda}}{k!} \), for \( k = 0, 1, 2, \ldots \).
+
+First, we compute the mean and variance of \( y_lo \):
+
+```{r}
+mean_y_lo <- mean(df_ts2$y_lo)
+var_y_lo <- var(df_ts2$y_lo)
+cat("Mean of y_lo:", mean_y_lo, "\nVariance of y_lo:", var_y_lo)
+```
+
+In the original course material, the mean and variance of \( y_lo \) were reported (values not explicitly provided here but can be computed). For a Poisson distribution, we expect \(\text{mean} \approx \text{variance}\). If the variance significantly exceeds the mean, the distribution may be overdispersed, requiring scaling or transformation.
+
+#### Step 3: Investigate Scaling
+
+Since Poisson distributions require non-negative integer values, we inspect the range of \( y_lo \):
+
+```{r}
+summary_y_lo <- summary(df_ts2$y_lo)
+cat("Summary of y_lo:\n")
+print(summary_y_lo)
+```
+
+The noise component \( y_lo \) from the inverse FFT is typically continuous and may include negative values due to the Fourier reconstruction. To model it as Poisson-like, we need to:
+1. Shift the data to ensure non-negative values (e.g., add a constant to make all values \(\geq 0\)).
+2. Scale the data to approximate integer values.
+3. Adjust the scale to align the mean and variance with a Poisson distribution.
+
+Let’s try shifting and scaling:
+
+```{r}
+# Shift to non-negative
+shift_constant <- abs(min(df_ts2$y_lo)) + 1e-6  # Small offset to avoid zero
+df_ts2 %<>%
+  mutate(y_lo_shifted = y_lo + shift_constant)
+
+# Check mean and variance of shifted data
+mean_y_lo_shifted <- mean(df_ts2$y_lo_shifted)
+var_y_lo_shifted <- var(df_ts2$y_lo_shifted)
+cat("Mean of shifted y_lo:", mean_y_lo_shifted, "\nVariance of shifted y_lo:", var_y_lo_shifted)
+```
+
+If the variance is still much larger than the mean, we can apply a scaling factor to reduce the spread:
+
+```{r}
+# Scale to reduce variance (e.g., divide by standard deviation or a factor)
+scaling_factor <- sqrt(var_y_lo_shifted / mean_y_lo_shifted)  # Approximate scaling to match mean and variance
+df_ts2 %<>%
+  mutate(y_lo_scaled = y_lo_shifted / scaling_factor)
+
+# Round to nearest integer for Poisson-like distribution
+df_ts2 %<>%
+  mutate(y_lo_rounded = round(y_lo_scaled))
+
+# Recalculate mean and variance
+mean_y_lo_rounded <- mean(df_ts2$y_lo_rounded)
+var_y_lo_rounded <- var(df_ts2$y_lo_rounded)
+cat("Mean of rounded y_lo:", mean_y_lo_rounded, "\nVariance of rounded y_lo:", var_y_lo_rounded)
+```
+
+#### Step 4: Estimate Poisson Parameter
+
+For a Poisson distribution, the parameter \(\lambda\) is the mean of the distribution. We use the mean of the rounded, scaled noise:
+
+```{r}
+lambda_est <- mean_y_lo_rounded
+cat("Estimated Poisson parameter (lambda):", lambda_est)
+```
+
+#### Step 5: Plot Histogram with Poisson Overlay
+
+We plot the histogram of the scaled and rounded noise (\(\mathrm{y_lo_rounded}\)) and overlay a Poisson distribution with parameter \(\lambda = \text{mean_y_lo_rounded}\):
+
+```{r}
+# Compute histogram and Poisson probabilities
+max_value <- max(df_ts2$y_lo_rounded)
+poisson_probs <- dpois(0:max_value, lambda = lambda_est)
+
+# Create data frame for Poisson overlay
+df_pois <- tibble(
+  x = 0:max_value,
+  prob = poisson_probs * nrow(df_ts2) * diff(hist(df_ts2$y_lo_rounded, plot = FALSE)$breaks)[1]
+)
+
+# Plot histogram with Poisson overlay
+df_ts2 %>%
+  ggplot(aes(x = y_lo_rounded)) +
+    geom_histogram(binwidth = 1, fill = "lightblue", color = "black") +
+    geom_line(data = df_pois, aes(x = x, y = prob), color = "red", size = 1) +
+    labs(title = "Histogram of Scaled Noise with Poisson Overlay",
+         x = "Scaled Noise (Rounded)", y = "Count") +
+    theme_minimal()
+```
+
+The red line represents the Poisson distribution with \(\lambda = \text{lambda_est}\). The histogram should show whether the scaled noise resembles a Poisson distribution.
+
+#### Step 6: Evaluate Poisson Fit
+
+To assess whether \( y_lo \) (after scaling) follows a Poisson distribution, we:
+1. **Compare Mean and Variance**: Check if \(\text{mean_y_lo_rounded} \approx \text{var_y_lo_rounded}\).
+2. **Visual Inspection**: Evaluate the histogram and Poisson overlay for visual similarity.
+3. **Statistical Test**: Optionally, perform a goodness-of-fit test (e.g., Chi-squared test) to compare the observed distribution to a Poisson distribution.
+
+```{r}
+# Chi-squared goodness-of-fit test
+hist_data <- hist(df_ts2$y_lo_rounded, breaks = seq(-0.5, max_value + 0.5, by = 1), plot = FALSE)
+observed <- hist_data$counts
+expected <- dpois(0:max_value, lambda = lambda_est) * sum(observed)
+chi_test <- chisq.test(observed, p = expected / sum(expected), rescale.p = TRUE)
+cat("Chi-squared test p-value:", chi_test$p.value)
+```
+
+A p-value > 0.05 suggests the scaled noise is consistent with a Poisson distribution.
+
+#### Conclusion
+
+- **Scaling Necessity**: The original \( y_lo \) likely required shifting (to ensure non-negativity) and scaling (to align mean and variance) to resemble a Poisson distribution. Rounding to integers further aligns the data with Poisson characteristics.
+- **Poisson Parameter**: The estimated \(\lambda \approx \text{mean_y_lo_rounded}\) provides a reasonable fit if the mean and variance are similar post-scaling.
+- **Fit Quality**: If the histogram aligns closely with the Poisson overlay and the Chi-squared test yields a high p-value, \( y_lo \) can be modeled as Poisson-like after appropriate transformations. If the fit is poor, the noise may follow a different distribution (e.g., Gaussian or overdispersed).
+
+**Challenges**:
+- The continuous nature of \( y_lo \) from the FFT makes direct Poisson modeling difficult without transformation.
+- If the variance remains significantly larger than the mean after scaling, the noise may not be Poisson-like, suggesting a need for alternative distributions (e.g., negative binomial for overdispersion).
+
+**Recommendation**: If the Poisson fit is inadequate, experiment with different scaling factors or consider alternative distributions. Adjust the scaling factor iteratively to minimize the difference between mean and variance.
+
+# Using libraries for trend & seasonality
+
+We have already seen how to extract **trend**, **seasonality**, and the **remainder** “by hand”.
+The **tidyverts** collection (`tsibble`, `feasts`, `fabletools`) does it in a tidy, pipe-friendly way.
+The workhorse is **STL** (Seasonal-Trend decomposition using LOESS) – the same method presented in [Forecasting: Principles and Practice (3rd ed.)](https://otexts.com/fpp3/).  
+For Python users, the same ideas are available in `statsmodels.tsa.seasonal.STL` or via feature-extraction packages such as `tsfresh`.
+
+## Univariate time series
+
+### Load synthetic data
+
+```{r load-synthetic-data}
+
+fpath_ts2 <- glue("{data_dir}/synthetic_TS_02.tsv")
+df_ts2    <- read_tsv(fpath_ts2)
+
+df_ts2
+```
+
+### Load Walmart (real) data
+
+```{r load-real-sc-data}
+
+fpath_wws <- glue("{data_dir}/Walmart/train.csv")
+df_wws <- read_csv(fpath_wws) %>%
+  rename_with(tolower) %>%
+  rename(is_holiday = isholiday,
+         weekly_sales = weekly_sales)
+
+df_wws
+
+```
+
+### Turn data frames into `tsibble` objects
+We first need to transform our data frames into Time Series objects.
+We use the library `tsibble` for that and quickly have a look at the data using the `autoplot` function.
+
+```{r transform-df-to-ts-ts2}
+
+ts_ts2 <- df_ts2 %>%
+  select(day, y_2) %>%
+  mutate(day = as_date(day)) %>%           # ensure Date class
+  tsibble(index = day)
+
+ts_ts2 %>% autoplot(y_2) + labs(title = "Synthetic series (y_2)")
+
+ts_wws <- df_wws %>%
+  mutate(yweek = yearweek(date)) %>%
+  tsibble(index = yweek, key = c(store, dept))
+
+# Quick sanity check: day-of-week distribution
+df_wws %>%
+  mutate(dow = wday(date, label = TRUE, abbr = TRUE)) %>%
+  count(dow)
+
+```
+
+Plot a few store-department combos.
+
+```{r transform-df-to-ts-wws}
+
+ts_wws %>%
+  filter(store %in% c(1, 2), dept %in% c(1, 3)) %>%
+  autoplot(weekly_sales) +
+  facet_grid(store ~ dept, scales = "free_y") +
+  labs(title = "Weekly sales – stores 1-2, departments 1 & 3")
+```
+
+## Classical additive decomposition (moving averages)
+Next, we'll use the **classical_decomposition** from the `feasts` package.
+It uses Moving Averages optimized in some ways.
+
+```{r default-classical-decomposition}
+
+ts_ts2 %>%
+  model(classical_decomposition(y_2, type = "additive")) %>%
+  components() %>%
+  autoplot() +
+  labs(title = "Classical additive decomposition (default MA)")
+```
+
+### Tweaking the season length
+
+```{r experiement-classical-decomposition-with-params}
+
+ts_ts2 %>%
+  model(classical_decomposition(y_2 ~ season(period = "365 days"),
+                                type = "additive")) %>%
+  components() %>%
+  autoplot() +
+  labs(title = "Classical decomposition – explicit 365-day season")
+
+```
+
+## STL from feasts (tidyverts)
+
+The `STL()` model in **feasts** is a thin wrapper around `stats::stl()` but works inside the `model()` pipeline.
+
+```{r}
+ts_ts2 %>%
+  model(
+    STL(y_2 ~ trend(window = 381, degree = 1) +
+              season(period = "1 year", window = 33, degree = 1),
+        robust = TRUE)
+  ) %>%
+  components() %>%
+  autoplot() +
+  labs(title = "STL (feasts) – robust, custom windows")
+```
+
+
+```{r stats-base-stl}
+
+ts_ts2_stl <- 
+  ts_ts2 %>% 
+  stl(s.window = "periodic",
+      s.degree = 1,
+      t.window = 380,
+      t.degree = 1) %>% 
+  extract2("time.series")
+ts_ts2_stl %>% autoplot
+
+ts_ts2_stl <- 
+  ts_ts2 %>% 
+  stl(s.window = 33,
+      s.degree = 1,
+      t.window = 751,
+      t.degree = 1) %>% 
+  extract2("time.series")
+ts_ts2_stl %>% autoplot
+
+```
+
+The **model** function from package `fabletools` also has a STL model:
+
+```{r experiment-with-STL}
+
+ts_ts2 %>%
+  model(STL(y_2 ~ trend(window = 0.75 * nrow(ts_ts2), 
+                        degree = 1) + 
+                  season(window = 0.1 * nrow(ts_ts2), 
+                         period = "1 year", 
+                         degree = 1),
+            robust = TRUE)) %>%
+  components %>%
+  autoplot()
+
+```
+
+## Multiple time series
+
+### Detect gaps
+Tools from `tsibble` for detecting gaps:
+
+```{r gaps-in-ts-wws}
+
+ts_wws %>% has_gaps
+
+ts_wws %>% has_gaps %>% filter(.gaps == TRUE)
+
+ts_wws %>% count_gaps()
+
+ts_wws %>%
+  filter(store == 1, dept == 18) %>%
+  print(n = 20)
+
+ts_wws %>% scan_gaps()
+
+```
+
+### Fill gaps (keep original keys)
+
+```{r fill_gaps}
+
+ts_wws %>%  fill_gaps(.full = TRUE)
+
+ts_wws %>%  fill_gaps(.full = FALSE)
+
+ts_wws %<>%  fill_gaps(.full = FALSE)
+
+ts_wws %>% group_by(store) %>% reframe(n_na = sum(is.na(weekly_sales)))
+
+ts_wws %>% group_by(dept) %>% reframe(n_na = sum(is.na(weekly_sales)))
+
+df_na_wws <-
+  ts_wws %>% 
+  group_by_key() %>% 
+  reframe(n_na = sum(is.na(weekly_sales)))
+df_na_wws
+
+df_na_wws %>%
+  mutate(has_na = n_na > 0) %>%
+  count(has_na) %>%
+  mutate(pct_na = n / sum(n) * 100)
+
+```
+
+We see that only *~18%* of the time series have missing data.
+
+### Keep only complete series
+Let's take only the data with non-missing values.
+
+```{r restrict-wws-TSs-to-non-missing-values}
+
+ts_wws_2 <-
+  ts_wws %>% 
+  group_by_key() %>% 
+  reframe(n_na = sum(is.na(weekly_sales))) %>%
+  filter(n_na == 0) %>%
+  select(-n_na) %>%
+  left_join(ts_wws) %>%
+  tsibble(index = yweek, key = c(store, dept))
+
+```
+
+Example: one store, several departments:
+
+```{r exple-1-store-few-dept}
+
+ts_wws_2 %>%
+  filter(store == 2,
+         dept <= 10) %>%
+  model(STL(weekly_sales ~ trend() + season(), robust = TRUE)) %>%
+  components %>%
+  autoplot()
+
+```
+
+Let's check dept 3 for the same store:
+
+```{r exple-1-store-1-dept}
+
+ts_wws_2 %>%
+  filter(store == 2,
+         dept == 3) %>%
+  model(STL(weekly_sales ~ trend() + season(), robust = TRUE)) %>%
+  components %>%
+  autoplot()
+
+```
+
+Let's check all the stores for dept 3:
+
+```{r exple-1-dept-all-stores}
+
+ts_wws_2 %>%
+  filter(dept == 3) %>%
+  group_by(store) %>%
+  reframe(n_na = sum(is.na(weekly_sales))) %>%
+  filter(n_na == 0)
+
+```
+
+Aggregate all stores by department:
+
+```{r aggregation-of-stores-by-dept}
+
+ts_wws_3 <-
+  df_wws %>%
+  group_by(dept, date) %>%
+  reframe(weekly_sales = sum(weekly_sales)) %>%
+  mutate(yweek = yearweek(date)) %>%
+  tsibble(index = yweek,
+          key = dept)
+
+ts_wws_3 %>%
+  filter(dept == 3) %>%
+  model(STL(weekly_sales ~ trend() + season(), robust = TRUE)) %>%
+  components %>%
+  autoplot()
+
+```
+
+
+## STL feature extraction
+
+`feasts` ships dozens of summary statistics, many derived from an STL decomposition.
+
+```{r features-basics}
+
+ts_ts2 %>% features(.var = y_2, features = list(mean = mean, med = median, min = min, max = max))
+
+ts_ts2 %>% features(.var = y_2, quantile)
+
+```
+
+STL-specific features:
+
+```{r features-stl}
+
+ts_ts2 %>% features(.var = y_2, features = feature_set(tags = "stl"))
+
+ts_wws %>% features(.var = weekly_sales, features = feat_stl)
+
+```
+
+Let's focus on trend strength for example (see a description in the chapter [STL features](https://otexts.com/fpp3/stlfeatures.html)).
+Let's re-arrange the data frame with the higher trend strength on top.
+
+```{r features-stl-desc-trend-strength}
+
+ts_wws_3 %>% features(.var = weekly_sales, features = feat_stl) %>% arrange(desc(trend_strength))
+
+```
+
+Plot a department with high trend strength:
+
+```{r exple-dept-high-trend-strength}
+
+ts_wws_3 %>%
+  filter(dept == 87) %>%
+  model(STL(weekly_sales ~ trend() + season(), robust = TRUE)) %>%
+  components %>%
+  autoplot()
+
+```
+
+
+## Python implementation
+
+```{python}
+import pandas as pd
+from statsmodels.tsa.seasonal import STL
+
+# Load synthetic data (same TSV)
+df = pd.read_csv("data/synthetic_TS_02.tsv", sep="\t", parse_dates=["day"])
+ts = df.set_index("day")["y_2"]
+
+# STL (period = 365)
+stl = STL(ts, period=365, robust=True).fit()
+
+# Plot
+stl.plot()
+```
+
+
+## Homework
+
+::: {#imp-hwk1 .callout-important}
+## To do at home
+
+Review the Time Series Analysis we have seen so far and read the Time Series chapters (1-4) of [Forecasting: Principles and Practice (3rd ed.)](https://otexts.com/fpp3/) (or another book you might like better).
+:::
+
+::: {#imp-hwk2 .callout-important}
+### To do at home (will be checked directly in class and in the quiz)
+
+1. Download the "Supply Chain" Time Series data from Moodle on your laptop.
+2. Look for some Time Series Analysis packages, in Python or R (there are several), choose one, and install it on your laptop.
+   You should also have a library that does smoothing, including LOESS, for "manual" analysis.
+3. Analyze the Time Series with the library tools in a notebook.
+   For the analysis, you can get inspired by this notebook, and go beyond (ask new questions and try to answer them, find new problems and try to solve them, ...).
+4. Prepare to present you analysis insights on your notebook in class.
+:::
+
+```{r}
+# Set data directory
+data_dir <- "data/Walmart"
+
+# Load Walmart data
+fpath_wws <- glue("{data_dir}/train.csv")
+df_wws_raw <- read_csv(fpath_wws, show_col_types = FALSE)
+
+# Pretty print summary
+cat(glue("
+=== WALMART DATA LOADED ===
+Dimensions: {nrow(df_wws_raw)} rows × {ncol(df_wws_raw)} columns
+Date range: {min(df_wws_raw$date)} to {max(df_wws_raw$date)}
+Stores: {length(unique(df_wws_raw$Store))}
+Departments: {length(unique(df_wws_raw$Dept))}
+\n"))
+```
+
+
+### Exploratory Data Analysis
+
+#### Data Preparation
+
+```{r}
+# Clean and prepare data
+df_wws <- df_wws_raw %>%
+  rename_with(tolower) %>%
+  rename(
+    store = store,
+    dept = dept,
+    weekly_sales = weekly_sales,
+    is_holiday = isholiday,
+    date = date
+  ) %>%
+  mutate(
+    is_holiday = as.logical(is_holiday),
+    date = as_date(date),
+    year = year(date),
+    month = month(date),
+    week_of_year = week(date)
+  ) %>%
+  arrange(date, store, dept)
+
+# Create tsibble
+ts_wws <- df_wws %>%
+  mutate(yweek = yearweek(date)) %>%
+  as_tsibble(index = yweek, key = c(store, dept))
+
+gap_info <- ts_wws %>% has_gaps()
+n_with_gaps <- sum(gap_info$.gaps)
+n_total <- nrow(gap_info)
+
+cat(glue("
+=== GAP ANALYSIS ===
+Total (store, dept) series: {n_total}
+Series with at least one missing week: {n_with_gaps}
+Percentage with gaps: {round(100 * n_with_gaps / n_total, 2)}%
+\n"))
+```
+
+
+#### Basic Descriptive Statistics
+
+```{r}
+# Overall summary
+summary_stats <- df_wws %>%
+  summarise(
+    n_obs = n(),
+    n_stores = n_distinct(store),
+    n_depts = n_distinct(dept),
+    date_range = paste(min(date), "to", max(date)),
+    sales_mean = mean(weekly_sales, na.rm = TRUE),
+    sales_median = median(weekly_sales, na.rm = TRUE),
+    sales_sd = sd(weekly_sales, na.rm = TRUE),
+    pct_holidays = mean(is_holiday) * 100
+  )
+
+summary_stats
+```
+
+
+#### Sales Distribution by Store Type
+
+```{r}
+# Top 10 stores by total sales
+top_stores <- df_wws %>%
+  group_by(store) %>%
+  summarise(total_sales = sum(weekly_sales, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(total_sales)) %>%
+  slice_head(n = 10)
+
+# Plot sales distribution
+df_wws %>%
+  group_by(store) %>%
+  summarise(
+    mean_sales = mean(weekly_sales, na.rm = TRUE),
+    total_sales = sum(weekly_sales, na.rm = TRUE),
+    n_weeks = n(),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = reorder(store, total_sales), y = total_sales / 1e6)) +
+  geom_col(fill = "steelblue", alpha = 0.7) +
+  coord_flip() +
+  labs(
+    title = "Total Sales by Store (Millions USD)",
+    x = "Store ID",
+    y = "Total Sales (M USD)"
+  ) +
+  scale_y_continuous(labels = dollar_format())
+```
+
+
+#### Holiday Impact Analysis
+
+```{r}
+# Holiday effect
+holiday_effect <- df_wws %>%
+  group_by(is_holiday) %>%
+  summarise(
+    mean_sales = mean(weekly_sales, na.rm = TRUE),
+    median_sales = median(weekly_sales, na.rm = TRUE),
+    n_obs = n(),
+    .groups = "drop"
+  )
+
+holiday_effect %>%
+  mutate(
+    holiday_label = ifelse(is_holiday, "Holiday Week", "Regular Week"),
+    sales_increase_pct = (mean_sales / lag(mean_sales) - 1) * 100
+  ) %>%
+  select(holiday_label, mean_sales, sales_increase_pct)
+
+# Visualize holiday impact
+df_wws %>%
+  group_by(date, is_holiday) %>%
+  summarise(mean_sales_all = mean(weekly_sales, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = date, y = mean_sales_all, color = is_holiday)) +
+  geom_line(size = 1) +
+  geom_point(data = . %>% filter(is_holiday), size = 2, color = "red") +
+  labs(
+    title = "Average Weekly Sales Across All Stores",
+    subtitle = "Red dots indicate holiday weeks",
+    x = "Date",
+    y = "Average Weekly Sales (USD)",
+    color = "Holiday Week"
+  ) +
+  scale_y_continuous(labels = dollar_format()) +
+  theme(legend.position = "bottom")
+```
+
+### STL Decomposition Analysis
+
+#### Handling Missing Values
+
+```{r}
+# Analyze missing values
+na_analysis <- ts_wws %>%
+  group_by(store, dept) %>%
+  summarise(
+    n_missing = sum(is.na(weekly_sales)),
+    n_total = n(),
+    pct_missing = n_missing / n_total * 100,
+    .groups = "drop"
+  )
+
+cat("Series with missing values:", sum(na_analysis$pct_missing > 0), "out of", nrow(na_analysis), "\n")
+cat("Average missing percentage:", round(mean(na_analysis$pct_missing[na_analysis$pct_missing > 0]), 2), "%\n")
+
+# Create complete dataset (fill gaps with NA, then filter complete series)
+ts_wws_complete <- ts_wws %>%
+  fill_gaps(.full = TRUE) %>%
+  group_by(store, dept) %>%
+  filter(sum(is.na(weekly_sales)) == 0) %>%
+  ungroup()
+
+n_complete <- ts_wws_complete %>%
+  distinct(store, dept) %>%
+  nrow()
+
+cat(glue("Complete series retained: {n_complete}\n"))
+```
+
+#### Single Series STL Decomposition
+
+```{r}
+# Select a representative store-department combination (Store 1, Dept 1)
+single_series <- ts_wws_complete %>%
+  filter(store == 1, dept == 1)
+
+# Apply STL decomposition
+stl_single <- single_series %>%
+  model(
+    STL(weekly_sales ~ trend(window = 21, degree = 1) + 
+              season(period = 52, window = 13, degree = 1),
+        robust = TRUE)
+  ) %>%
+  components()
+
+# Plot decomposition
+stl_single %>%
+  autoplot() +
+  labs(
+    title = "STL Decomposition: Store 1, Department 1",
+    subtitle = "Weekly Sales with Trend, Seasonal, and Remainder Components"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+
+#### Multiple Series Comparison
+
+```{r}
+# Compare multiple departments in Store 1
+store1_depts <- ts_wws_complete %>%
+  filter(store == 1, dept %in% c(1, 2, 3, 5, 10))
+
+# Apply STL to multiple series
+stl_multiple <- store1_depts %>%
+  model(STL(weekly_sales ~ trend() + season(), robust = TRUE)) %>%
+  components()
+
+# Visualize
+stl_multiple %>%
+  autoplot() +
+  facet_wrap(~ dept, scales = "free_y", ncol = 3) +
+  labs(
+    title = "STL Decomposition: Store 1, Multiple Departments",
+    subtitle = "Comparing trend and seasonal patterns across departments"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+#### Aggregated Analysis by Department
+
+```{r}
+# Aggregate sales by department across all stores
+ts_dept_agg <- df_wws %>%
+  filter(!is.na(weekly_sales)) %>%
+  group_by(dept, date) %>%
+  summarise(
+    weekly_sales = sum(weekly_sales),
+    n_stores = n_distinct(store),
+    .groups = "drop"
+  ) %>%
+  mutate(yweek = yearweek(date)) %>%
+  as_tsibble(index = yweek, key = dept)
+
+# Select top departments by total sales
+top_depts <- ts_dept_agg %>%
+  group_by(dept) %>%
+  summarise(total_sales = sum(weekly_sales), .groups = "drop") %>%
+  slice_max(total_sales, n = 5) %>%
+  pull(dept)
+
+# STL for top departments
+top_dept_stl <- ts_dept_agg %>%
+  filter(dept %in% top_depts) %>%
+  model(STL(weekly_sales ~ trend() + season(period = 52), robust = TRUE)) %>%
+  components()
+
+# Plot
+top_dept_stl %>%
+  autoplot() +
+  facet_wrap(~ dept, scales = "free_y", ncol = 3) +
+  labs(
+    title = "STL Decomposition: Top 5 Departments (Aggregated)",
+    subtitle = "Department-level sales patterns across all stores"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+#### Which departments show the strongest seasonal patterns?
+
+```{r}
+# === STL Feature Extraction (Correct Names) ===
+stl_features <- ts_dept_agg %>%
+  features(weekly_sales, feat_stl)
+
+# Inspect once (uncomment to debug)
+stl_features %>% glimpse()
+
+dept_features <- stl_features %>%
+  arrange(desc(seasonal_strength_year)) %>%
+  slice_head(n = 10)
+
+# Pretty table
+dept_features %>%
+  select(dept, seasonal_strength_year, trend_strength, seasonal_peak_year, seasonal_trough_year) %>%
+  mutate(
+    dept = glue("Dept {dept}"),
+    seasonal_strength_year = percent(seasonal_strength_year, accuracy = 0.1)
+  ) %>%
+  kableExtra::kable(
+    col.names = c("Department", "Seasonal Strength", "Trend Strength", "Peak Week", "Trough Week"),
+    digits = 3
+  ) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+#### Can we detect structural breaks in the trend component?
+
+```{r}
+# Extract trend component and test for breaks
+trend_analysis <- ts_dept_agg %>%
+  filter(dept %in% top_depts) %>%
+  model(STL(weekly_sales ~ trend(window = 21) + season(), robust = TRUE)) %>%
+  components() %>%
+  mutate(
+    trend_change = c(0, diff(trend)),
+    trend_acceleration = c(0, diff(trend_change)),
+    year_quarter = yearquarter(yweek)
+  )
+
+# Identify potential structural breaks (large trend changes)
+trend_breaks <- trend_analysis %>%
+  group_by(dept) %>%
+  filter(abs(trend_change) > quantile(abs(trend_change), 0.95, na.rm = TRUE)) %>%
+  ungroup()
+
+# Visualize trend with break points
+trend_analysis %>%
+  ggplot(aes(x = yweek, y = trend)) +
+  geom_line(color = "steelblue", alpha = 0.8) +
+  geom_point(data = trend_breaks, 
+             aes(color = "Potential Break"), size = 2) +
+  facet_wrap(~ dept, scales = "free_y", ncol = 3) +
+  labs(
+    title = "Trend Component with Potential Structural Breaks",
+    subtitle = "Points indicate weeks with unusually large trend changes",
+    x = "Year-Week",
+    y = "Trend Component",
+    color = ""
+  ) +
+  theme(legend.position = "bottom")
+```
 
 
