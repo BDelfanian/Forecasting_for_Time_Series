@@ -1,0 +1,545 @@
+---
+title: "F4SC.  Simple Exponential Smoothing"
+author: "Bertrand Haas"
+date: "30 Oct. 2025"
+format: 
+  html:
+    code-fold: true
+    code-overflow: scroll
+    code-line-numbers: true
+    code-tools: true
+    df_print: paged
+    toc: true
+    toc-location: left
+    smooth_scroll: true
+    embed-resources: true
+---
+
+# R environment setting
+
+Required libraries:
+
+```{r librairies-to-install}
+#| cache: true
+#| output: false
+cran_repo <- "https://ftp.fau.de/cran"
+list_Rpack2use <-
+  c("rmarkdown",
+    "conflicted",
+    "devtools",
+    "knitr",
+    "quarto",
+    "bookdown",
+    #shiny,
+    "DT",
+    "Hmisc",
+    "tidyverse",
+    "magrittr",
+    "lubridate",
+    "hms",
+    "glue",
+    "skimr",
+    "lobstr",
+    "janitor",
+    "zeallot",
+    "stringi",
+    "lemon",
+    "crayon",
+    "jsonlite",
+    #"officer",
+    "TSA",
+    "tsibble",
+    "fable",
+    "feasts",
+    "imputeTS",
+    "readxl",
+    "slider",
+    "reticulate",
+    "aws.s3",
+    "paws",
+    "RAthena",
+    "botor",
+    "RPostgres",
+    "DBI",
+    "RJDBC",
+    "dbplyr",
+    "arrow",
+    "geosphere",
+    "viridis")
+
+list_installed_packages <- names(installed.packages()[,2])
+for (Rpack in list_Rpack2use) {
+  if (! Rpack %in% list_installed_packages) {
+    print(paste("Installing", Rpack))
+    install.packages(Rpack, repos = cran_repo, )
+  } else {
+    print(paste(Rpack, "already installed."))
+  }
+}
+
+```
+
+Loaded librairies:
+
+```{r librairies-to-load}
+#| cache: false
+
+list_Rpack2load_not <-
+  c("conflicted",
+    "devtools",
+    "paws",
+    "RAthena",
+    "botor",
+    "arrow",
+    "RPostgres",
+    "DBI",
+    "RJDBC",
+    "dbplyr",
+    "aws.s3",
+    "arrow",
+    "reticulate",
+    "slider",
+    "stringi",
+    "geosphere",
+    "blah")
+list_Rpack2load <- setdiff(list_Rpack2use, list_Rpack2load_not)
+list_Rpack2load
+
+```
+
+```{r loading-libraries}
+#| cache: false
+#| output: false
+  
+for (Rpack in list_Rpack2load) {
+  library(Rpack, character.only = TRUE)
+}
+
+conflicted::conflicts_prefer(pillar::dim_desc)
+conflicted::conflicts_prefer(magrittr::extract)
+conflicted::conflicts_prefer(dplyr::filter)
+conflicted::conflicts_prefer(jsonlite::flatten)
+conflicted::conflicts_prefer(hms::hms)
+conflicted::conflicts_prefer(dbplyr::ident)
+conflicted::conflicts_prefer(lubridate::interval)
+conflicted::conflicts_prefer(dplyr::lag)
+conflicted::conflicts_prefer(readxl::read_xlsx)
+conflicted::conflicts_prefer(magrittr::set_names)
+conflicted::conflicts_prefer(dbplyr::sql)
+conflicted::conflicts_prefer(Hmisc::src)
+conflicted::conflicts_prefer(dplyr::summarize)
+conflicted::conflicts_prefer(magrittr::is_in)
+
+```
+
+```{r local-setting}
+
+#To pass if interactive
+#rendering <- TRUE
+#time_all <- proc.time()
+
+source("./scripts_gal/misc_funs.R")
+
+dir_data <- "./data/"
+
+if (!dir.exists(dir_data)) {
+  dir.create(dir_data)
+}
+
+```
+
+# Simple Exponential Smoothing (SES)
+
+Simple Exponential Smoothing (SES) is a forecasting method used for time series data that do not show any clear trend or seasonality. It assigns exponentially decreasing weights to past observations, meaning more recent observations have a stronger influence on the forecast than older ones.
+
+## Mathematical Formulation
+
+Let \( y_t \) denote the observed value at time \( t \), and \( \hat{y}_{t+1|t} \) the forecast for period \( t+1 \) made at time \( t \).
+
+The updating equation is:
+
+$$
+\hat{y}_{t+1|t} = \alpha y_t + (1 - \alpha)\hat{y}_{t|t-1}
+$$
+
+where:
+
+- \( \alpha \in [0, 1] \) is the smoothing parameter,  
+- \( y_t \) is the actual observation at time \( t \),  
+- \( \hat{y}_{t|t-1} \) is the previous forecast.
+
+The initial forecast \( \hat{y}_{1|0} \) can be set as the first observation (\( y_1 \)) or as the mean of the first few observations.
+
+## Interpretation of the Smoothing Parameter
+
+- If \( \alpha \) is close to 1, the forecast reacts quickly to recent changes (less smoothing).  
+- If \( \alpha \) is close to 0, the forecast reacts slowly (more smoothing).
+
+## Recursive Expansion
+
+Expanding recursively gives:
+
+$$
+\hat{y}_{t+1|t} = \alpha y_t + \alpha(1-\alpha)y_{t-1} + \alpha(1-\alpha)^2 y_{t-2} + \cdots
+$$
+
+This shows that SES is a weighted average of all past observations, with weights that decay exponentially over time.
+
+## Forecast Horizon
+
+For all horizons \( h \geq 1 \):
+
+$$
+\hat{y}_{t+h|t} = \hat{y}_{t+1|t}
+$$
+
+This means that the forecast remains constant beyond the first step — SES assumes the future will continue at the same level.
+
+## When to Use SES
+
+Simple Exponential Smoothing is most appropriate when:
+
+- The time series has no trend or seasonality.  
+- The data fluctuates randomly around a relatively stable mean.
+
+## Model Selection
+
+The smoothing parameter \( \alpha \) is typically chosen by minimizing a forecast accuracy metric such as:
+
+- Mean Squared Error (MSE)  
+- Mean Absolute Error (MAE)  
+- Akaike Information Criterion (AIC)
+
+# Simple Exponential Smoothing through Kernel Smoothing
+
+Simple Exponential Smoothing (SES) can be viewed as a special case of **kernel smoothing**, where the kernel function assigns exponentially decaying weights to past observations. This interpretation connects SES with nonparametric smoothing methods used in statistics.
+
+## Kernel Smoothing Overview
+
+In general, kernel smoothing estimates a smoothed value \( \hat{y}_t \) by taking a weighted average of past observations:
+
+$$
+\hat{y}_t = \sum_{j=1}^{t} K(t - j; \lambda) \, y_j
+$$
+
+where:
+
+- \( K(t - j; \lambda) \) is a **kernel function** that assigns a weight to observation \( y_j \) based on its distance from time \( t \),
+- \( \lambda \) is a **bandwidth** or **smoothing parameter** controlling how quickly the weights decay.
+
+The kernel weights are normalized so that:
+
+$$
+\sum_{j=1}^{t} K(t - j; \lambda) = 1
+$$
+
+## Exponential Kernel
+
+In Simple Exponential Smoothing, the kernel function takes an **exponential form**:
+
+$$
+K(t - j; \alpha) = \alpha (1 - \alpha)^{t - j}
+$$
+
+where \( 0 < \alpha < 1 \) is the smoothing parameter.  
+This means that recent observations receive the most weight, and the influence of older data decays exponentially.
+
+Thus, the smoothed estimate becomes:
+
+$$
+\hat{y}_t = \sum_{j=1}^{t} \alpha (1 - \alpha)^{t - j} y_j
+$$
+
+which is equivalent to the recursive SES updating equation:
+
+$$
+\hat{y}_{t+1|t} = \alpha y_t + (1 - \alpha)\hat{y}_{t|t-1}
+$$
+
+## Interpretation
+
+From the kernel-smoothing perspective:
+
+- SES corresponds to a **one-sided kernel smoother**, since only **past observations** are used (no future values).  
+- The **exponential kernel** ensures that weights decay geometrically as we move further back in time.  
+- The parameter \( \alpha \) plays a role analogous to the **bandwidth** in kernel methods: a small \( \alpha \) yields smoother estimates (larger effective bandwidth), while a large \( \alpha \) makes the smoother more responsive to recent changes.
+
+## Connection to Other Kernels
+
+While SES uses an exponential kernel, other kernel functions (such as Gaussian or uniform) can also be applied for smoothing in time series contexts. These alternatives lead to **symmetric kernel smoothers**, typically used for estimating trend components rather than forecasts.
+
+In contrast, SES’s exponential kernel provides an **asymmetric, causal smoother**, suitable for real-time forecasting where only past information is available.
+
+
+# Simple Exponential Smoothing thru kernel-smoothing
+
+We have already seen some smoothing tools, like LOESS or GAM.
+LOESS works with a kernel, usually tricubic weights:
+\begin{align*}
+v_i &= (1 - (|d_i/d|)^3)^3 \\
+w_i &= \frac{v_i}{\sum v_i}
+\end{align*}
+
+```{r plot-tricubic}
+
+tibble(x = seq(-1, 1, by = 0.01)) %>%
+  mutate(tc = (1 - abs(x)^3)^3) %>%
+  ggplot(aes(x, tc)) +
+    geom_line() +
+    ggtitle("Tricubic function")
+
+```
+
+These weights apply both on the right and on the left of the point under consideration (which corresponds to zero in the plot above), excepted at the boundary values.
+If we apply this kernel only to the last value of our Time Series, we get a value that can be interpreted as a forecast.
+
+```{r smoothing-param-lam}
+lam <- 0.1
+```
+
+Instead of a tricubic kernel, we could also use a Normal, or an exponential kernel.
+Let's try with an exponential kernel, that is, with weights proportional to $e^{-\lambda}$ for some parameter $\lambda$.
+We'll use $\lambda = `r lam`$ here.
+
+We first load our usual synthetic data:
+
+```{r load-synthetic-data}
+
+fpath_ts2 <- glue("{dir_data}synthetic_TS_02.tsv")
+df_ts2 <- 
+  read_tsv(fpath_ts2) %>% 
+  select(year, day, y_2) %>%
+  mutate(day_noy = format(day, "0000-%m-%d") %>% as_date) %>% #date with no year
+  relocate(day_noy, .after = day)
+
+df_ts2
+
+```
+
+And apply the exponential kernel:
+
+```{r apply-expo-kernel}
+
+df_ts2$fcast_1 <- NA
+for (i in 1:(nrow(df_ts2)-1)) {
+  w_i <- exp(-lam * i:1)
+  w_i <- w_i / sum(w_i)
+  df_ts2$fcast_1[i+1] = sum(w_i * df_ts2$y_2[1:i])
+}
+
+```
+
+Let's check that for the first year (where we can see the first date), and plot the smoothed TS for each year.
+
+```{r show-es-1}
+
+df_ts2  %>%
+  filter(year == 2023)
+
+```
+
+```{r plot-es-1}
+
+df_ts2 %>%
+  ggplot(aes(x = day_noy, y = y_2)) +
+    geom_line() +
+    geom_line(aes(y = fcast_1),
+              color = "blue",
+              alpha = 0.8) +
+    facet_wrap(~year, ncol = 1)
+
+```
+
+::: {#imp-hwk1 .callout-important}
+## To do at home
+
+Here we used $\lambda = `r lam`$.
+Try the same code, but using $\lambda = 0.1$ and $\lambda = 0.9$.
+What do you observe?
+:::
+
+
+It turns out that an exponential kernel can also be interpreted in a very simple (and computationally simple) way.
+
+# Simple Exponential Smoothing thru recurrence
+
+We'll use the notations of [Data Science for Supply Chain Forecasting](https://www.oreilly.com/library/view/data-science-for/9783110671209/) for forecasts ($f$) and actual ($d$, for demand).
+
+## Naive forecast
+
+This follows the principle "What happens today is what happened yesterday".
+In other words:
+\begin{equation*}
+f(t) = d(t-1)
+\end{equation*}
+
+```{r naive_fcast}
+
+df_ts2 %<>%
+  mutate(fcast_naive = lag(y_2)) %>%
+  relocate(fcast_naive, .before = fcast_1)
+
+df_ts2 %>%
+  filter(year == 2025) %>%
+  ggplot(aes(x = day_noy, y = y_2)) +
+    geom_line() +
+    geom_line(aes(y = fcast_naive),
+              color = "darkgreen",
+              alpha = 0.8) +
+    facet_wrap(~year, ncol = 1)
+
+```
+
+We clearly see the 1-day offset here.
+
+## Less naive forecast 
+
+Suppose we need to forecast a value for today (this is early morning now), and we already forecasted a value yesterday.
+We know yesterday's actual today, but we think that there might be some noise there, and our forecast was actually pretty good.
+So we can forecast today as a weighted average of yesterday's forecast and actual:
+$$
+f(t) = \alpha d(t-1) + (1 - \alpha) f(t-1)
+$$ {#eq-base-es}
+
+```{r expo-smoothing-fcast-2}
+
+alf <- 0.9
+df_ts2$fcast_2 <- df_ts2$y_2[1]
+for (i in 2:nrow(df_ts2)) {
+  df_ts2$fcast_2[i] <- alf * df_ts2$y_2[i-1] + (1 - alf) * df_ts2$fcast_2[i-1]
+}
+
+df_ts2 %>%
+  filter(year == 2023)
+
+df_ts2 %>%
+  filter(year >= 2025) %>%
+  ggplot(aes(x = day_noy, y = y_2)) +
+    geom_line() +
+    geom_line(aes(y = fcast_1),
+              color = "blue",
+              alpha = 0.8) +
+    geom_line(aes(y = fcast_2),
+              color = "red",
+              alpha = 0.8) +
+    facet_wrap(~ year, ncol = 1)
+
+```
+
+We see that the 2 lines are fairly close to each other.
+Why?
+
+Let's expand equation (@eq-base-es}
+\begin{align*}
+f(t) &= \alpha d(t-1) + (1-\alpha)(\alpha d(t-2) + (1-\alpha) f(t-2)) \\
+     &= \alpha d(t-1) + \alpha (1 - \alpha) d(t-2) + (1-\alpha)^2 (\alpha d(t-3) + (1-\alpha) f(t-3)) \\
+     &= \alpha d(t-1) + \alpha (1-\alpha) d(t-2) + \alpha (1 - \alpha)^2 d(t-3) + \alpha (1-\alpha)^3 d(t-4) + \dots \\
+     &= \alpha((1 - \alpha)^0 d(t-1) + (1-\alpha)^1 d(t-2) + (1-\alpha)^2 d(t-3) + \dots + (1-\alpha)^k d(t-k-1) + \dots + (1-\alpha)^{t-1} d(0))
+\end{align*}
+
+We see here that we get exponentially decreasing weights.
+
+::: {#imp-hwk2 .callout-important}
+## To do at home
+
+Try the same code with different values for $\alpha$.
+What do you observe and how to you explain it?
+:::
+
+::: {#imp-hwk3 .callout-important}
+## To do at home
+
+Relate the recurrence relation parameter $\alpha$ with the kernel parameter $\lambda$ (write one in terms of the other).
+:::
+
+## Initialization
+
+We usually take $f(0) = d(0)$, but some people might take an average of the first few actuals.
+
+::: {#imp-hwk4 .callout-important}
+## To do at home
+
+Use the average of the first 10 values as $f(0)$.
+How does the forecast change?
+Does forecasting before day 11 make sense?
+:::
+
+# Relationship Between the Recurrence Parameter \( \alpha \) and the Kernel Parameter \( \lambda \)
+
+Simple Exponential Smoothing (SES) can be interpreted as a special case of kernel smoothing using an **exponential kernel**.  
+In the kernel representation, the weights decay exponentially as:
+
+$$
+K(t - j; \lambda) = C \, e^{-\lambda (t - j)}
+$$
+
+where:
+
+- \( \lambda > 0 \) is the **decay rate** (kernel parameter),  
+- \( C \) is a normalization constant ensuring that the weights sum to 1.
+
+In the recurrence form of SES, the exponentially decaying weights are written as:
+
+$$
+w_j = \alpha (1 - \alpha)^{t - j}
+$$
+
+where \( \alpha \) is the **smoothing parameter** in the SES recurrence relation:
+
+$$
+\hat{y}_t = \alpha y_t + (1 - \alpha)\hat{y}_{t-1}
+$$
+
+To make the two formulations equivalent, we equate the decay factors:
+
+$$
+(1 - \alpha)^{t - j} = e^{-\lambda (t - j)}
+$$
+
+This equality must hold for all \( t - j \), which gives:
+
+$$
+1 - \alpha = e^{-\lambda}
+$$
+
+or equivalently,
+
+$$
+\alpha = 1 - e^{-\lambda}
+$$
+
+## Interpretation
+
+- When \( \lambda \) is small, the exponential kernel decays slowly, corresponding to a **small \( \alpha \)** and strong smoothing.  
+- When \( \lambda \) is large, the kernel decays rapidly, corresponding to a **large \( \alpha \)** and more reactive forecasts.
+
+Thus, the **recurrence-based smoothing parameter \( \alpha \)** in SES and the **decay rate \( \lambda \)** in the exponential kernel are directly related through the transformation:
+
+$$
+\boxed{\alpha = 1 - e^{-\lambda}} \quad \text{or equivalently} \quad \boxed{\lambda = -\ln(1 - \alpha)}
+$$
+
+
+# Greater horizons
+
+We often need to forecast more than one period ahead (more than one day ahead here).
+The number of periods ahead is called the *horizon*.
+Sometimes horizons start at 0:  Imagine we are early morning and we need to forecast for today.  It makes sense to call that a horizon-0 forecast.
+Sometimes horizons start at 1:  Imagine we are close to midnight and we need to forecast for tomorrow.  It makes sense to call that a horizon-1 forecast.
+
+In any case, usually we extend the forecast by pretending that the forecast for today is an actual, so it can be used for tomorrow as such.
+Here if we pretend that $f(t+1) = d(t+1)$, then:
+\begin{align*}
+f(t+2) &= \alpha f(t+1) + (1-\alpha) f(t+1) \\
+       &= f(t+1)
+\end{align*}
+So $f(t+h) = f(t+1)$.
+
+# Homework
+
+Recall the homework:
+
+1. Play with the parameter $\lambda$ in the exponential-kernel definition of Simple Exponential Smoothing. [Hwk @imp-hwk1]
+2. Do the same with the parameter $\alpha$ in the recurrence relation definition. [Hwk @imp-hwk2]
+3. Write $\alpha$ in terms of $\lambda$ and $\lambda$ in terms of $\alpha$. [Hwk @imp-hwk3]
+4. Play with the initialization $f(0)$ in the recurrence relation. [Hwk @imp-hwk4]
