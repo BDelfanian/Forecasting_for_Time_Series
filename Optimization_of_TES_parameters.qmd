@@ -1,0 +1,1054 @@
+---
+title: "F4SC.  Optimization of TES parameters"
+author: "Bertrand Haas"
+date: "30 Oct. 2025"
+format: 
+  html:
+    code-fold: true
+    code-overflow: scroll
+    code-line-numbers: true
+    code-tools: true
+    df_print: paged
+    toc: true
+    toc-location: left
+    smooth_scroll: true
+    embed-resources: true
+---
+
+# R environment setting
+
+Required libraries:
+
+```{r librairies-to-install}
+#| cache: true
+#| output: false
+cran_repo <- "https://ftp.fau.de/cran"
+list_Rpack2use <-
+  c("rmarkdown",
+    "conflicted",
+    "devtools",
+    "knitr",
+    "quarto",
+    "bookdown",
+    #shiny,
+    "DT",
+    "Hmisc",
+    "tidyverse",
+    "magrittr",
+    "lubridate",
+    "hms",
+    "glue",
+    "skimr",
+    "lobstr",
+    "janitor",
+    "zeallot",
+    "stringi",
+    "lemon",
+    "crayon",
+    "jsonlite",
+    #"officer",
+    "TSA",
+    "tsibble",
+    "fable",
+    "feasts",
+    "imputeTS",
+    "readxl",
+    "slider",
+    "reticulate",
+    "aws.s3",
+    "paws",
+    "RAthena",
+    "botor",
+    "RPostgres",
+    "DBI",
+    "RJDBC",
+    "dbplyr",
+    "arrow",
+    "geosphere",
+    "viridis")
+
+list_installed_packages <- names(installed.packages()[,2])
+for (Rpack in list_Rpack2use) {
+  if (! Rpack %in% list_installed_packages) {
+    print(paste("Installing", Rpack))
+    install.packages(Rpack, repos = cran_repo, )
+  } else {
+    print(paste(Rpack, "already installed."))
+  }
+}
+
+```
+
+Loaded librairies:
+
+```{r librairies-to-load}
+#| cache: false
+
+list_Rpack2load_not <-
+  c("conflicted",
+    "devtools",
+    "paws",
+    "RAthena",
+    "botor",
+    "arrow",
+    "RPostgres",
+    "DBI",
+    "RJDBC",
+    "dbplyr",
+    "aws.s3",
+    "arrow",
+    "reticulate",
+    "slider",
+    "stringi",
+    "geosphere",
+    "blah")
+list_Rpack2load <- setdiff(list_Rpack2use, list_Rpack2load_not)
+list_Rpack2load
+
+```
+
+```{r loading-libraries}
+#| cache: false
+#| output: false
+  
+for (Rpack in list_Rpack2load) {
+  library(Rpack, character.only = TRUE)
+}
+
+conflicted::conflicts_prefer(pillar::dim_desc)
+conflicted::conflicts_prefer(magrittr::extract)
+conflicted::conflicts_prefer(dplyr::filter)
+conflicted::conflicts_prefer(jsonlite::flatten)
+conflicted::conflicts_prefer(hms::hms)
+conflicted::conflicts_prefer(dbplyr::ident)
+conflicted::conflicts_prefer(lubridate::interval)
+conflicted::conflicts_prefer(dplyr::lag)
+conflicted::conflicts_prefer(readxl::read_xlsx)
+conflicted::conflicts_prefer(magrittr::set_names)
+conflicted::conflicts_prefer(dbplyr::sql)
+conflicted::conflicts_prefer(Hmisc::src)
+conflicted::conflicts_prefer(dplyr::summarize)
+conflicted::conflicts_prefer(magrittr::is_in)
+
+```
+
+```{r local-setting}
+
+#To pass if interactive
+#rendering <- TRUE
+#time_all <- proc.time()
+
+source("./scripts_gal/misc_funs.R")
+
+dir_data <- "./data"
+
+if (!dir.exists(dir_data)) {
+  dir.create(dir_data)
+}
+
+```
+
+# Optimization by grid search
+
+We first load our usual synthetic data:
+
+```{r load-synthetic-data}
+
+fpath_ts3 <- glue("{dir_data}/synthetic_TS_03.tsv")
+df_ts3 <- 
+  read_tsv(fpath_ts3)
+
+df_ts3
+
+n_dat <- nrow(df_ts3)
+
+```
+
+## DES grid search (HWK from DES session)
+
+We first need to code functions for DES smoothing:
+
+### Additive DES
+
+Let's recall the recurrence formulae for $a(t)$ and $b(t)$ with dampening factor $phi$:
+\begin{align*}
+a(t) &= \alpha d(t) + (1 - \alpha) (a(t-1) + \phi b(t-1)) \\
+b(t) &= \beta (a(t) - a(t-1)) + (1 - \beta) \phi b(t-1)
+\end{align*}
+Once we have computed all the $a(t)$ and $b(t)$, we can compute the forecasts for horizon $k$:
+$$
+f(t+1) = a(t) + (\phi + \phi^2 + \dots + \phi^k) * b(t)
+$$
+
+```{r fun-des-add}
+
+fun_des_add <- function(df_0, a_0, b_0, alf_0, bet_0, fi_0 = 1, hoz_0 = 1) {
+  df_0$a_t = a_0
+  df_0$b_t = b_0
+  for (t in 2:nrow(df_0)) {
+    df_0$a_t[t] = alf_0 * df_0$d_t[t] + (1 - alf_0) * (df_0$a_t[t-1] + fi_0 * df_0$b_t[t-1])
+    df_0$b_t[t] = bet_0 * (df_0$a_t[t] - df_0$a_t[t-1]) + (1 - bet_0) * fi_0 * df_0$b_t[t-1]
+  }
+  sum_fi = 0
+  for (i in 1:hoz_0) {
+    sum_fi = sum_fi + fi_0^i
+  }
+  df_0 %<>%
+    mutate(fcast_des = lag(a_t) + sum_fi * lag(b_t))
+  return(df_0)
+}
+
+print(fun_des_add)
+
+```
+
+### Multiplicative DES
+
+Here the recurrence formulae for $a(t)$ and $b(t)$ are:
+\begin{align*}
+a(t) &= \alpha d(t) + (1 - \alpha) (a(t-1) * b(t-1)^\phi) \\
+b(t) &= \beta (a(t) / a(t-1)) + (1 - \beta) b(t-1)^\phi
+\end{align*}
+Once we have computed all the $a(t)$ and $b(t)$, we can compute the forecasts:
+$$
+f(t+1) = a(t) + b(t)^{(\phi + \phi^2 + \dots + \phi^k)}
+$$
+
+```{r fun-des-mult}
+
+fun_des_mult <- function(df_0, a_0, b_0, alf_0, bet_0, fi_0 = 1, hoz_0 = 1) {
+  df_0$a_t = a_0
+  df_0$b_t = b_0
+  for (t in 2:nrow(df_0)) {
+    df_0$a_t[t] = alf_0 * df_0$d_t[t] + (1 - alf_0) * (df_0$a_t[t-1] * df_0$b_t[t-1]^fi_0)
+    df_0$b_t[t] = bet_0 * (df_0$a_t[t] / df_0$a_t[t-1]) + (1 - bet_0) * df_0$b_t[t-1]^fi_0
+  }
+  sum_fi = 0
+  for (i in 1:hoz_0) {
+    sum_fi = sum_fi + fi_0^i
+  }
+  df_0 %<>%
+    mutate(fcast_des = lag(a_t) * lag(b_t)^sum_fi)
+  return(df_0)
+}
+
+print(fun_des_mult)
+
+```
+
+### KPI gathering
+
+Here we use the usual MAE, MAPE, MedAPE, and WAPE as KPIs, but we also introduce a new one that is comparatively not used very much, but worth knowing for its nice properties, the MASE (Mean Absolute Scaled Error.
+
+#### The base MASE
+
+It was introduced among others by Rob Hyndman and is explained in his book [Forecasting: Principles and Practice](https://otexts.com/fpp2/accuracy.html#scaled-errors).
+
+It is similar to the WAPE, which is the ratio of MAE over the mean of the actuals.
+But the MASE is the ratio of the MAE for the forecast method of interest, to the MAE for naive forecasting.
+Or, in terms of errors, with $e(t) = f(t) - d(t)$ using the current notations (and starting at $t = 0$), we define the scaled error:
+$$
+q(t) = \frac{e(t)}{\frac{1}{n} \sum_{t=1}^T|d(t) - d(t-1)|}
+$$
+Then the MASE is
+$$
+MASE = mean(|q(t)|)
+$$
+
+It is worth noting that naive forecasting is the best forecasting method (in terms of the usual KPIs) for Random Walk processes.
+A discrete random walk process is defined as:
+$$
+y(t) = y(t-1) + \epsilon
+$$
+where $\epsilon \sim N(0, \sigma^2)$.
+This is why naive forecasting is written **rwf** in the R "forecast" package.
+
+#### Seasonal MASE
+
+There is a seasonal version of the  MASE, let's write it seaMASE, that is particularly fit in SC when we have significant seasonal effects.
+Here we use the seasonal naive forecast, that is, instead of going back one day, we go back a full seasonal period.
+$$
+q(t) = \frac{e(t)}{\frac{1}{n} \sum_{t=1}^T|d(t) - d(t-p)|}
+$$
+Then the seaMASE is again the mean of the absolute values of the $q(t)$'s.
+
+FYI, there are other variants of the MASE, for example taking into account "drift" in random walks, which is equivalent to a linear trend.
+
+We can now code the MASE function (with default season 1):
+
+```{r define-fun-mase}
+
+fun_mase <- function(f_t, d_t, p = 1) {
+  e_t <- f_t - d_t
+  scal <- mean(abs(d_t - lag(d_t, n = p)), na.rm = TRUE)
+  return(mean(abs(e_t[(p+1):length(e_t)]), na.rm = TRUE)/scal)
+}
+
+print(fun_mase)
+
+```
+
+#### MAE, MAPE, WAPE, MedAPE, and WASE gathering
+
+While we are at it, let's also code our usual KPIs:
+
+```{r define-fun-mae-mape-medape-wape}
+
+fun_mae <- function(f_t, d_t) {
+  return(mean(abs(f_t - d_t), na.rm = TRUE))
+}
+
+fun_mape <- function(f_t, d_t) {
+  ape <- abs(f_t - d_t) / d_t * 100
+  return(mean(ape, na.rm = TRUE))
+}
+
+fun_medape <- function(f_t, d_t) {
+  ape <- abs(f_t - d_t) / d_t * 100
+  return(median(ape, na.rm = TRUE))
+}
+
+fun_wape <- function(f_t, d_t) {
+  return(fun_mae(f_t, d_t) / mean(d_t, na.rm = TRUE) * 100)
+}
+
+```
+
+Next we define a function to gather the KPIs over a 11x11 default $(\alpha, \beta)$ grid with each parameter ranging from $0$ to $1$ by steps of $0.1$, and $phi$ by default set to $1$ (as a 1x1 grid).
+The horizon is also set to $1$ by default.
+This function also takes the forecast function as input (so far, it can be fun_des_add, or fun_des_mult).
+
+```{r fun-kpi-des}
+
+seq_11 <- seq(0, 1, by = 0.1) %>% round(digits = 1)
+
+fun_kpi_des <- function(df_00, a_00, b_00, 
+                        fun_des,
+                        seq_alf = seq_11,
+                        seq_bet = seq_11,
+                        seq_fi  = 1,
+                        hoz_00  = 1) {
+  #Computes KPIs for all (alpha, beta) parameters from the grid seq_alf X seq_bet
+  # both for SES and DES
+  df_param <- tibble()
+  alf_i <- 0
+  for (alf in seq_alf) {
+    print(glue("alpha = {alf}"))
+    alf_i <- alf_i + 1
+    time_alf <- proc.time()
+    for (bet in seq_bet) {
+      for (fi in seq_fi) {
+        df_1 <- 
+          fun_des(df_0  = df_00,
+                  a_0   = a_00,  b_0   = b_00,
+                  alf_0 = alf,   bet_0 = bet,
+                  fi_0  = fi,    hoz_0 = hoz_00)
+        df_param_i <-
+          tibble(mae       = fun_mae( df_1$fcast_des, df_1$d_t),
+                 mae_d     = fun_mae( df_1$dd_t,      df_1$d_t),
+                 mape      = fun_mape(df_1$fcast_des, df_1$d_t),
+                 mape_d    = fun_mape(df_1$dd_t,      df_1$d_t),
+                 medape    = fun_mape(df_1$fcast_des, df_1$d_t),
+                 medape_d  = fun_mape(df_1$dd_t,      df_1$d_t),
+                 wape      = fun_wape(df_1$fcast_des, df_1$d_t),
+                 wape_d    = fun_wape(df_1$dd_t,      df_1$d_t),
+                 mase      = fun_mase(df_1$fcast_des, df_1$d_t),
+                 mase_d    = fun_mase(df_1$dd_t,      df_1$d_t),
+                 seamase   = fun_mase(df_1$fcast_des, df_1$d_t, p = 365),
+                 seamase_d = fun_mase(df_1$dd_t,      df_1$d_t, p = 365)) %>%
+          mutate(alpha   = alf,
+                 beta    = bet,
+                 phi     = fi,
+                 horizon = hoz_00)
+        df_param %<>% bind_rows(df_param_i)
+      }
+    }
+    time_alf <- proc.time() - time_alf
+    print(glue("Alpha iteration {alf_i}: {round(time_alf[3], digits = 2)} seconds"))
+  }
+  df_param %<>%
+    relocate(c(alpha, beta, phi, horizon))
+  return(df_param)
+}
+
+print(fun_kpi_des)
+
+```
+
+### Grid search for the best params
+
+```{r inital-a-b-1}
+
+a_1 <- df_ts3$d_t[1]
+b_1 <- df_ts3$d_t[2] - df_ts3$d_t[1]
+
+```
+
+Let's start with initial value $a(0) = d(0) = `r a_1`$ for both SES and DES, and $b(0) = d(1) - d(0) = `r b_1`$.
+
+```{r get-kpis-add-vs-mult}
+
+df_param_ades_1 <- fun_kpi_des(df_ts3, a_1, b_1, fun_des_add)
+df_param_ades_1
+
+df_param_mdes_1 <- fun_kpi_des(df_ts3, a_1, b_1, fun_des_mult)
+df_param_mdes_1
+
+```
+
+Let's check the minimum KPIs and compare additive vs multiplicative DES:
+
+```{r check-minimum-kpis-1}
+
+df_param_ades_1 %>%
+  filter(mae    == min(mae)    |
+         mape   == min(mape)   |
+         medape == min(medape) |
+         wape   == min(wape)   |
+         mase   == min(mase))
+
+df_param_mdes_1 %>%
+  filter(mae    == min(mae)    |
+         mape   == min(mape)   |
+         medape == min(medape) |
+         wape   == min(wape)   |
+         mase   == min(mase))
+
+alf_a1 <- 0.2
+bet_a1 <- 0.1
+
+```
+
+Observations:  
+* Each method (additive and multiplicative) yield only one row of minimum KPIs.  
+  This means that all the KPIs agree on their minimum (this is not always the case).
+* Both method agree on the best pair $(\alpha, \beta) = (`r alf_a1`, `r bet_a1`)$.  
+* The additive model seems a better fit to the data (the KPIs are lower than for the multiplicative model).  
+
+### Visualization
+
+One advantage of grid search is that we can see how the KPI changes with one parameter (or even 2 parameters if we can plot in 3-D).
+For example, lets check how the KPIs change with alpha (setting beta to it optimal value $bet_a1$).
+We see that $\alpha = 0$ is way off.
+So as to not distort the plot too much, we start at $\alpha = 0.1$ and use log-y coordinates.
+
+```{r plot-kpi-with-alpha}
+
+df_param_ades_1 %>%
+  filter(beta == bet_a1) %>%
+  filter(alpha > 0) %>%
+  select(alpha, mae, mape, medape, wape, mase, seamase) %>%
+  pivot_longer(cols      = c(mae, mape, medape, wape, mase, seamase),
+               names_to  = "KPI",
+               values_to = "value") %>%
+  ggplot(aes(x = alpha, y = log(value), color = KPI)) +
+    geom_point(size = 0.5) +
+    geom_line(show.legend = FALSE) +
+    facet_wrap(~ KPI,
+               scale = "free_y")
+
+```
+
+And similarly for $\beta$ with $\alpha$ set to its optimal value $\alf_a1$.
+
+```{r plot-kpi-with-beta}
+
+df_param_ades_1 %>%
+  filter(alpha == alf_a1) %>%
+  #filter(beta > 0) %>%
+  select(beta, mae, mape, medape, wape, mase, seamase) %>%
+  pivot_longer(cols      = c(mae, mape, medape, wape, mase, seamase),
+               names_to  = "KPI",
+               values_to = "value") %>%
+  ggplot(aes(x = beta, y = log(value), color = KPI)) +
+    geom_point(size = 0.5) +
+    geom_line(show.legend = FALSE) +
+    facet_wrap(~ KPI,
+               scale = "free_y")
+
+```
+
+### Analysis of $\phi$ {#sec-analysis-phi}
+
+Let's re-run our grid search with phi ranging over $(0.5, 0.8, 1)$ and for horizon 7 days.
+
+```{r collect-kpis-des-add-with-fi-hoz-7}
+
+df_param_addes_2 <- fun_kpi_des(df_ts3, a_1, b_1, fun_des_add, seq_fi = c(0.5, 0.8, 1), hoz_00 = 7)
+df_param_addes_2
+
+```
+
+Let's check the minimum KPIs:
+
+```{r check-mini-kpi}
+
+df_param_addes_2 %>%
+  filter(mae     == min(mae)    |
+         mape    == min(mape)   |
+         medape  == min(medape) |
+         wape    == min(wape)   |
+         mase    == min(mase)   |
+         seamase == min(seamase))
+
+alf_a2 <- 0.1
+bet_a2 <- 0.4
+
+```
+
+Here we see a small discrepancy between MASE and seaMASE in terms of which parameters are optimal.
+Let's pick $\alpha = `r alf_a2`$ and $\beta = `r bet_a2`$ and check the KPIs for the different values of phi:
+
+```{r kpis-for-all-phi}
+
+df_param_addes_2 %>%
+  filter(alpha == alf_a2,
+         beta  == bet_a2) %>%
+  select(-matches("_d$"))
+
+```
+
+We see a significant drop specially between $\phi = 1$ and $\phi = 0.8$.
+
+### Is SES included in DES?
+
+We might think that setting $\beta$ to zero in the DES model might yield the SES model, but from the recurrence equations we see that in that case $b(t) = b(0)$ for all $t$, and therefore $a(t) = \alpha d(t) + (1-\alpha) a(t) + (1-\alpha) b(0)$, so it has a constant bias of $(1 - \alpha) b(0)$.
+The only way to include SES in DES is to set both $\beta = 0$ AND $b(0) = 0$.
+
+Let's compute our KPIs on our $(\alpha, \beta)$ grid, setting $b(0) = 0$, then filtering  to $\beta = 0$.
+
+```{r compute-kpis-des-with-b0-0}
+
+df_param_ses_1 <- fun_kpi_des(df_ts3, a_1, 0, fun_des_add) 
+
+df_param_ses_1 %<>%
+  filter(beta == 0) %>%
+  select(-c(beta, phi))
+df_param_ses_1
+
+```
+
+Then we check the parameters for the minimum KPIs and compare with those of DES:
+
+```{r check-optim-param-ses-compared-with-des-1}
+
+print("SES best param:")
+df_param_ses_1 %>%
+  filter(mae     == min(mae)    |
+         mape    == min(mape)   |
+         medape  == min(medape) |
+         wape    == min(wape)   |
+         mase    == min(mase)   |
+         seamase == min(seamase))
+
+print("DES best params:")
+df_param_ades_1 %>%
+  filter(mae     == min(mae)    |
+         mape    == min(mape)   |
+         medape  == min(medape) |
+         wape    == min(wape)   |
+         mase    == min(mase)   |
+         seamase == min(seamase))
+
+```
+
+We see something that might appear surprising here.
+The KPIs for SES are better (lower) that those for DES.
+How can a more sophisticated model incorporating a simpler model can do worse that the simpler one?
+
+This is because this version of DES does not quite incorporate the same version of SES.
+We started with parameter $b(0) = b_1$ in DES and with $b(0) = 0$ in SES.
+To compare apples to apples, we need to re-compute our array of KPIs for DES starting with $b(0) = 0$ as well.
+
+```{r re-compute-des-kpis-with-b0-0}
+
+df_param_ades_3 <- fun_kpi_des(df_ts3, a_1, 0, fun_des_add)
+df_param_ades_3
+
+```
+
+Now we can compare again SES with DES on the same footing:
+
+```{r check-optim-param-ses-compared-with-des-2}
+
+print("SES best param:")
+df_param_ses_1 %>%
+  filter(mae     == min(mae)    |
+         mape    == min(mape)   |
+         medape  == min(medape) |
+         wape    == min(wape)   |
+         mase    == min(mase)   |
+         seamase == min(seamase))
+
+print("DES best params:")
+df_param_ades_3 %>%
+  filter(mae     == min(mae)    |
+         mape    == min(mape)   |
+         medape  == min(medape) |
+         wape    == min(wape)   |
+         mase    == min(mase)   |
+         seamase == min(seamase))
+
+```
+
+We see now that using the DES model yileds better, not worse, KPIs.
+
+We might ask why the initialization $b(0) = 0$ did better than $b(0) = d(0)$.
+This is because $d(t)$ is noisy.
+But since we know the "un-noised" version of the TS (the deterministic component), the best choice as $b(0)$ would be $dd(0)$, the deterministic demand, which is very close to zero:  $dd(0) =$ `r df_ts3$ddt[1]`.
+
+## TES Grid search
+
+We can now do the same thing with TES.
+It's just more complicated...
+
+```{r fun-kpi-tes}
+
+fun_tes_add <- function(df_0, a_0, b_0, s_0, alf_0, bet_0, gam_0, fi_0 = 1, hoz_0 = 1) {
+  p_0 <- length(s_0)
+  df_0 %<>%
+    mutate(a_t = a_0,
+           b_t = b_0,
+           s_t = -1)
+  df_0$s_t[1:p_0] <- s_0
+  for (i in (p_0+1):nrow(df_0)) {
+    df_0$a_t[i] <- alf_0 * (df_0$d_t[i] - df_0$s_t[i-p_0]) + (1-alf_0) * (df_0$a_t[i-1] + fi_0 * df_0$b_t[i-1])
+    df_0$b_t[i] <- bet_0 * (df_0$a_t[i] - df_0$a_t[i-1]) + (1-bet_0) * fi_0 *df_0$b_t[i-1]
+    df_0$s_t[i] <- gam_0 * (df_0$d_t[i] - df_0$a_t[i]) + (1-gam_0) * df_0$s_t[i-p_0]
+  }
+  sum_fi = 0
+  for (i in 1:hoz_0) {
+    sum_fi = sum_fi + fi_0^i
+  }
+  df_0 %<>%
+    mutate(fcast_tes = lag(a_t) + sum_fi * lag(b_t) + lag(s_t, n = p_0 - hoz_0))
+  return(df_0)
+}
+
+fun_tes_mult <- function(df_0, a_0, b_0, s_0, alf_0, bet_0, gam_0, fi_0 = 1, hoz_0 = 1) {
+  p_0 <- length(s_0)
+  df_0 %<>%
+    mutate(a_t = a_0,
+           b_t = b_0,
+           s_t = -1)
+  df_0$s_t[1:p_0] <- s_0
+  for (i in (p_0+1):nrow(df_0)) {
+    df_0$a_t[i] <- alf_0 * (df_0$d_t[i] / df_0$s_t[i-p_0]) + (1-alf_0) * (df_0$a_t[i-1] + fi_0 * df_0$b_t[i-1])
+    df_0$b_t[i] <- bet_0 * (df_0$a_t[i] - df_0$a_t[i-1]) + (1-bet_0) * fi_0 * df_0$b_t[i-1]
+    df_0$s_t[i] <- gam_0 * (df_0$d_t[i] / df_0$a_t[i]) + (1-gam_0) * df_0$s_t[i-p_0]
+  }
+  sum_fi = 0
+  for (i in 1:hoz_0) {
+    sum_fi = sum_fi + fi_0^i
+  }
+  df_0 %<>%
+    mutate(fcast_tes = (lag(a_t) + sum_fi * lag(b_t)) * lag(s_t, n = p_0 - hoz_0))
+  return(df_0)
+}
+
+fun_kpi_tes <- function(df_00, fun_tes, a_00, b_00, s_00,
+                        p_00     = 365,
+                        seq_alf = seq_11,
+                        seq_bet = seq_11,
+                        seq_gam = seq_11,
+                        seq_fi  = 1,
+                        hoz_00  = 1) {
+  time_kpi_tes <- proc.time()
+  df_param <- tibble()
+  alf_i <- 0
+  for (alf in seq_alf) {
+    print(glue("alpha = {alf}"))
+    alf_i <- alf_i + 1
+    time_alf <- proc.time()
+    for (bet in seq_bet) {
+      for (gam in seq_gam) {
+        for (fi in seq_fi) {
+          df_1 <- 
+            fun_tes(df_0 = df_00, a_0  = a_00, b_0  = b_00, s_0 = s_00,
+                          alf_0 = alf, bet_0 = bet, gam_0 = gam, fi_0 = fi, hoz_0 = hoz_00)
+          df_1 %<>% filter(row_number() > p_0)
+          df_param_i <-
+            tibble(mae       = fun_mae( df_1$fcast_tes, df_1$d_t),
+                   mae_d     = fun_mae( df_1$dd_t,      df_1$d_t),
+                   mape      = fun_mape(df_1$fcast_tes, df_1$d_t),
+                   mape_d    = fun_mape(df_1$dd_t,      df_1$d_t),
+                   medape    = fun_mape(df_1$fcast_tes, df_1$d_t),
+                   medape_d  = fun_mape(df_1$dd_t,      df_1$d_t),
+                   wape      = fun_wape(df_1$fcast_tes, df_1$d_t),
+                   wape_d    = fun_wape(df_1$dd_t,      df_1$d_t),
+                   mase      = fun_mase(df_1$fcast_tes, df_1$d_t),
+                   mase_d    = fun_mase(df_1$dd_t,      df_1$d_t),
+                   seamase   = fun_mase(df_1$fcast_tes, df_1$d_t, p = 365),
+                   seamase_d = fun_mase(df_1$dd_t,      df_1$d_t, p = 365)) %>%
+          mutate(alpha  = alf,
+                 beta   = bet,
+                 gamma  = gam,
+                 phi    = fi,
+                 horizon = hoz_00)
+          df_param %<>% bind_rows(df_param_i)
+        }
+      }
+    }
+    time_alf <- proc.time() - time_alf
+    print(glue("Alpha iteration {alf_i}: {round(time_alf[3], digits = 2)} seconds"))
+  }
+  df_param %<>%
+    relocate(c(alpha, beta, gamma, phi, horizon))
+  time_kpi_tes <- proc.time() - time_kpi_tes 
+  print(glue("Time to optimize params through {length(seq_alf)}x{length(seq_bet)}x{length(seq_gam)}x{length(seq_fi)} grid search: {round(time_kpi_tes[3] / 60, digits = 2)} minutes"))
+  return(df_param)
+}
+
+```
+
+We initialize the values as follows:
+
+* $a(0) = d(0)$ as usual.
+* $b(0) = d(1) - d(0)$.
+* $s(0)$ will be the first year values, normalized appropriately for the additive and multiplicative versions.
+
+```{r initial-values}
+
+p_0 <- 365
+aa_1 <- df_ts3$d_t[1]
+am_1 <- df_ts3$d_t[1]
+ba_1 <- df_ts3$d_t[p_0 + 1] - df_ts3$d_t[p_0]
+#ba_1 <- 0
+bm_1 <- df_ts3$d_t[p_0 + 1] / df_ts3$d_t[p_0]
+#bm_1 <- 0
+sa_1 <- df_ts3$d_t[1:p_0] - mean(df_ts3$d_t[1:p_0])
+sm_1 <- df_ts3$d_t[1:p_0] / sum(df_ts3$d_t[1:p_0]) * p_0
+
+```
+
+Let's compute the accuracy KPIs for additive TES:
+
+```{r get-kpis-add-tes}
+
+df_param_ates <- fun_kpi_tes(df_ts3, fun_tes_add, aa_1, ba_1, sa_1)
+df_param_ates
+
+```
+
+And for multiplicative TES:
+
+```{r get-kpis-mult-tes}
+
+df_param_mtes <- fun_kpi_tes(df_ts3, fun_tes_mult, am_1, bm_1, sm_1)
+df_param_mtes
+
+```
+
+Let's find the parameters for the minimum KPIs:
+
+```{r params-minimum-kpis}
+
+df_param_ates_min <-
+  df_param_ates %>%
+  filter(mae     == min(mae)    |
+         mape    == min(mape)   |
+         medape  == min(medape) |
+         wape    == min(wape)   |
+         mase    == min(mase)   |
+         seamase == min(seamase)) %>%
+  arrange(desc(wape))
+df_param_ates_min
+
+df_param_mtes_min <-
+  df_param_mtes %>%
+  filter(mae     == min(mae)    |
+         mape    == min(mape)   |
+         medape  == min(medape) |
+         wape    == min(wape)   |
+         mase    == min(mase)   |
+         seamase == min(seamase)) %>%
+  arrange(desc(wape))
+df_param_mtes_min
+
+min_wape_add  <- df_param_ates_min$wape %>% last
+min_wape_mult <- df_param_mtes_min$wape %>% last
+
+alf_a3 <- df_param_ates_min$alpha %>% last %>% round(digits = 1)
+bet_a3 <- df_param_ates_min$beta  %>% last %>% round(digits = 1)
+gam_a3 <- df_param_ates_min$gamma %>% last %>% round(digits = 1)
+alf_m3 <- df_param_mtes_min$alpha %>% last %>% round(digits = 1)
+bet_m3 <- df_param_mtes_min$beta  %>% last %>% round(digits = 1)
+gam_m3 <- df_param_mtes_min$gamma %>% last %>% round(digits = 1)
+
+best_albega_a3 <- c(alf_a3, bet_a3, gam_a3)
+best_albega_m3 <- c(alf_m3, bet_m3, gam_m3)
+
+```
+
+Observations:  
+* It looks like the additive model yield more than one row of minimum KPIs.  
+  But there is only a discrepancy for seamase.  
+* Both method do not agree on the best $beta$ and $gamma$.  
+  We will use  $(\alpha_a, \beta_a, \gamma_a) =$ (`r c(alf_a3, bet_a3, gam_a3)`) for the additive model and $(\alpha_a, \beta_a, \gamma_a) =$ (`r c(alf_a3, bet_a3, gam_a3)`) for the multiplicative model as best parameters.  
+* The seasonal-multiplicative model seems a better fit to the data (the KPIs are lower than for the multiplicative model).
+
+ Since there is some discrepancy for the best $beta$ in the additive model, let's look at how the KPIs change with it leaving $\alpha$ and $\gamma$ fixed.
+
+```{r plot-kpis-wrt-gamma-add}
+
+df_param_ates %>%
+  filter(alpha == alf_a3,
+         gamma == gam_a3) %>%
+  select(beta, mae, mape, medape, wape, mase, seamase) %>%
+  pivot_longer(cols      = c(mae, mape, medape, mase, seamase),
+               names_to  = "KPI",
+               values_to = "value") %>%
+  ggplot(aes(x = beta, y = log(value), color = KPI)) +
+    geom_point(size = 0.5) +
+    geom_line() +
+    facet_wrap(~ KPI,
+               scale = "free_y")
+
+```
+
+We see that the best beta is indeed $0.2$ for all but the seamase KPIs, but it is not very far from $0.1$.
+We will keep $0.2$.
+Let's check the same for the multiplicative model:
+
+```{r plot-kpis-wrt-gamma-mult}
+
+df_param_mtes %>%
+  filter(alpha == alf_m3,
+         gamma == gam_a3) %>%
+  select(beta, mae, mape, medape, wape, mase, seamase) %>%
+  pivot_longer(cols      = c(mae, mape, medape, mase, seamase),
+               names_to  = "KPI",
+               values_to = "value") %>%
+  ggplot(aes(x = beta, y = log(value), color = KPI)) +
+    geom_point(size = 0.5) +
+    geom_line() +
+    facet_wrap(~ KPI,
+               scale = "free_y")
+
+```
+
+Here it makes sense to keep $\beta =$ `r bet_m3`.
+
+::: {#imp-hwk1 .callout-important}
+## To do at home
+
+We saw that for DES, the initial value $b(0) = 0$ gave better results.
+Re-do the same analysis using $b(0) = 0$ instead of $b(0) = d(1) - d(0)$.
+:::
+
+Let's compute the accuracy KPIs for additive TES using $b(0) = 0$:
+
+```{r get-kpis-add-tes-b0}
+
+df_param_ates_b0 <- fun_kpi_tes(df_ts3, fun_tes_add, aa_1, 0, sa_1)
+df_param_ates_b0
+
+```
+
+And for multiplicative TES using $b(0) = 0$:
+
+```{r get-kpis-mult-tes-b0}
+
+df_param_mtes_b0 <- fun_kpi_tes(df_ts3, fun_tes_mult, am_1, 0, sm_1)
+df_param_mtes_b0
+
+```
+
+Let's find the parameters for the minimum KPIs:
+
+```{r params-minimum-kpis-b0}
+
+df_param_ates_b0_min <-
+  df_param_ates_b0 %>%
+  filter(mae     == min(mae)    |
+         mape    == min(mape)   |
+         medape  == min(medape) |
+         wape    == min(wape)   |
+         mase    == min(mase)   |
+         seamase == min(seamase)) %>%
+  arrange(desc(wape))
+df_param_ates_b0_min
+
+df_param_mtes_b0_min <-
+  df_param_mtes_b0 %>%
+  filter(mae     == min(mae)    |
+         mape    == min(mape)   |
+         medape  == min(medape) |
+         wape    == min(wape)   |
+         mase    == min(mase)   |
+         seamase == min(seamase)) %>%
+  arrange(desc(wape))
+df_param_mtes_b0_min
+
+min_wape_add_b0  <- df_param_ates_b0_min$wape %>% last
+min_wape_mult_b0 <- df_param_mtes_b0_min$wape %>% last
+
+alf_a4 <- df_param_ates_b0_min$alpha %>% last %>% round(digits = 1)
+bet_a4 <- df_param_ates_b0_min$beta  %>% last %>% round(digits = 1)
+gam_a4 <- df_param_ates_b0_min$gamma %>% last %>% round(digits = 1)
+alf_m4 <- df_param_mtes_b0_min$alpha %>% last %>% round(digits = 1)
+bet_m4 <- df_param_mtes_b0_min$beta  %>% last %>% round(digits = 1)
+gam_m4 <- df_param_mtes_b0_min$gamma %>% last %>% round(digits = 1)
+
+best_albega_a4 <- c(alf_a4, bet_a4, gam_a4)
+best_albega_a4
+
+best_albega_m4 <- c(alf_m4, bet_m4, gam_m4)
+best_albega_m4
+```
+
+
+::: {#imp-hwk2 .callout-important}
+## To do at home
+Replicate the analysis for $\phi$ for TES that we did for DES in section @sec-analysis-phi .
+:::
+
+Let's re-run our grid search with phi ranging over $(0.5, 0.8, 1)$ and for horizon 7 days.
+
+```{r collect-kpis-tes-add-with-fi-hoz-7}
+
+df_param_addes_3 <- fun_kpi_tes(df_ts3, fun_tes_add, aa_1, ba_1, sa_1, seq_fi = c(0.5, 0.8, 1), hoz_00 = 7)
+df_param_addes_3
+
+```
+
+Let's check the minimum KPIs:
+
+```{r check-mini-kpi-tes}
+
+df_param_addes_3 %>%
+  filter(mae     == min(mae)    |
+         mape    == min(mape)   |
+         medape  == min(medape) |
+         wape    == min(wape)   |
+         mase    == min(mase)   |
+         seamase == min(seamase))
+
+alf_a3 <- 0.3
+bet_a3 <- 0.0
+gam_a3 <- 0.7
+
+```
+
+Let's pick $\alpha = `r alf_a3`$, $\beta = `r bet_a3`$, and $\gamma = `r gam_a3`$ and check the KPIs for the different values of phi:
+
+```{r kpis-for-all-phi-tes}
+
+df_param_addes_3 %>%
+  filter(alpha == alf_a3,
+         beta  == bet_a3,
+         gamma  == gam_a3) %>%
+  select(-matches("_d$"))
+
+```
+
+
+::: {#imp-hwk3 .callout-important}
+## To do at home
+
+What arguments should you set to what in fun_tes_add to make it into a fun_des_add?
+:::
+
+# Optimization by builtin optimizers
+
+
+Grid search is very useful to visualize how the KPIs change with the parameters, and for a 11x11x11 grid, it is not very expensive.
+This is one of the main advantage of Holt-Winters (TES) forecasting:
+It is very frugal in terms of parameters (only 3, or 4 counting damping), and does very well with that (compared with ARIMA for example).
+
+But the time needed to compute the best parameters also depends on the size and numbers of the datasets.
+If we have hundreds of daily TS, over 5 or more years, it might prove timely impractical.
+So, in these cases we need to use more efficient optimizers, and there are plenty in R or python.
+Here we will use only the base "optim()" one in R:
+
+We need to pass the optimizer a cost function.
+Here we will use the WAPE function, but the function for other KPIs can be used in parallel.
+
+```{r fun-kpis}
+
+fun_cost_wape <- function(abc, #for more than 1 parameter, input a vector.
+                         a_00, b_00, s_00,
+                         fun_tes, df_00 = df_ts3) {
+  alf_00 <- abc[1]
+  bet_00 <- abc[2]
+  gam_00 <- abc[3]
+  n_dat  <- nrow(df_00)
+  df_00 <- 
+    fun_tes(df_0  = df_00,
+            a_0   = a_00,
+            b_0   = b_00,
+            s_0   = s_00,
+            alf_0 = alf_00,
+            bet_0 = bet_00,
+            gam_0 = gam_00,
+            fi_0  = 1)
+  return(fun_wape(df_00$fcast_tes, df_00$d_t))
+}
+
+print(fun_cost_wape)
+
+init_albega_1 <- c(0.5, 0.5, 0.5)
+
+```
+
+We also need to pass it some initial values for the parameters to optimize on.
+Here we'll uses $abc = (a(0), b(0), c(0)) =$ `r init_albega_1`.
+
+We can now run the optimizer (for additive and multiplicative models):
+
+```{r run-optimizer}
+
+oo_add_1 <- 
+  optim(par = init_albega_1,
+        fn = fun_cost_wape, 
+        a_00 = aa_1, b_00 = ba_1, s_00 = sa_1, 
+        fun_tes = fun_tes_add, df_00 = df_ts3) 
+
+oo_mult_1 <- 
+  optim(par = init_albega_1,
+        fn = fun_cost_wape, 
+        a_00 = aa_1, b_00 = ba_1, s_00 = sm_1, 
+        fun_tes = fun_tes_mult, df_00 = df_ts3) 
+
+```
+
+## Additive model
+
+Let's see the parameters found and the minimized WAPE value:
+
+```{r minimums-found-add}
+
+tibble(method       = rep(c("grid_search", "optimizer"), each = 2),
+       result_type  = rep(c("alpha__beta__gamma", "min_WAPE"), 2),
+       result_value = list(c(best_albega_a3), min_wape_add, oo_add_1$par, oo_add_1$value) %>% map(round, digits = 2) %>% map_chr(paste, collapse = "__"))
+
+```
+
+We see that the parameters found are close to the ones we found by grid search (`r best_albega_a3`).
+
+The minimum WAPE is a little larger than the one grid search found (`r min_wape_add`).
+
+## Multiplicative model
+
+```{r minimums-found-mult}
+
+tibble(method       = rep(c("grid_search", "optimizer"), each = 2),
+       result_type  = rep(c("alpha__beta__gamma", "min_WAPE"), 2),
+       result_value = list(c(best_albega_m3), min_wape_mult, oo_mult_1$par, oo_mult_1$value) %>% map(round, digits = 2) %>% map_chr(paste, collapse = "__"))
+
+init_albega_2 <- c(0, 0, 0)
+init_albega_3 <- c(1, 1, 1)
+
+```
+
+Similarly for the multiplicative model
+
+Sometimes the optimizer results (local minima) are very dependent on the initial values.
+
+
+::: {#imp-hwk4 .callout-important}
+## To do at home
+
+For our optimizer we took "middle" values (0.5) as initial values for $\alpha, \beta, \gamma$.
+Do you get the same results from "extreme" initial values (0, 0, 0) and (1, 1, 1)?
+:::

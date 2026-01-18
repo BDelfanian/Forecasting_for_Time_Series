@@ -1,0 +1,575 @@
+---
+title: "F4SC.  Double Exponential Smoothing"
+author: "Bertrand Haas"
+date: "30 Oct. 2025"
+format: 
+  html:
+    code-fold: true
+    code-overflow: scroll
+    code-line-numbers: true
+    code-tools: true
+    df_print: paged
+    toc: true
+    toc-location: left
+    smooth_scroll: true
+    embed-resources: true
+---
+
+# R environment setting
+
+Required libraries:
+
+```{r librairies-to-install}
+#| cache: true
+#| output: false
+cran_repo <- "https://ftp.fau.de/cran"
+list_Rpack2use <-
+  c("rmarkdown",
+    "conflicted",
+    "devtools",
+    "knitr",
+    "quarto",
+    "bookdown",
+    #shiny,
+    "DT",
+    "Hmisc",
+    "tidyverse",
+    "magrittr",
+    "lubridate",
+    "hms",
+    "glue",
+    "skimr",
+    "lobstr",
+    "janitor",
+    "zeallot",
+    "stringi",
+    "lemon",
+    "crayon",
+    "jsonlite",
+    #"officer",
+    "TSA",
+    "tsibble",
+    "fable",
+    "feasts",
+    "imputeTS",
+    "readxl",
+    "slider",
+    "reticulate",
+    "aws.s3",
+    "paws",
+    "RAthena",
+    "botor",
+    "RPostgres",
+    "DBI",
+    "RJDBC",
+    "dbplyr",
+    "arrow",
+    "geosphere",
+    "viridis")
+
+list_installed_packages <- names(installed.packages()[,2])
+for (Rpack in list_Rpack2use) {
+  if (! Rpack %in% list_installed_packages) {
+    print(paste("Installing", Rpack))
+    install.packages(Rpack, repos = cran_repo, )
+  } else {
+    print(paste(Rpack, "already installed."))
+  }
+}
+
+```
+
+Loaded librairies:
+
+```{r librairies-to-load}
+#| cache: false
+
+list_Rpack2load_not <-
+  c("conflicted",
+    "devtools",
+    "paws",
+    "RAthena",
+    "botor",
+    "arrow",
+    "RPostgres",
+    "DBI",
+    "RJDBC",
+    "dbplyr",
+    "aws.s3",
+    "arrow",
+    "reticulate",
+    "slider",
+    "stringi",
+    "geosphere",
+    "blah")
+list_Rpack2load <- setdiff(list_Rpack2use, list_Rpack2load_not)
+list_Rpack2load
+
+```
+
+```{r loading-libraries}
+#| cache: false
+#| output: false
+  
+for (Rpack in list_Rpack2load) {
+  library(Rpack, character.only = TRUE)
+}
+
+conflicted::conflicts_prefer(pillar::dim_desc)
+conflicted::conflicts_prefer(magrittr::extract)
+conflicted::conflicts_prefer(dplyr::filter)
+conflicted::conflicts_prefer(jsonlite::flatten)
+conflicted::conflicts_prefer(hms::hms)
+conflicted::conflicts_prefer(dbplyr::ident)
+conflicted::conflicts_prefer(lubridate::interval)
+conflicted::conflicts_prefer(dplyr::lag)
+conflicted::conflicts_prefer(readxl::read_xlsx)
+conflicted::conflicts_prefer(magrittr::set_names)
+conflicted::conflicts_prefer(dbplyr::sql)
+conflicted::conflicts_prefer(Hmisc::src)
+conflicted::conflicts_prefer(dplyr::summarize)
+conflicted::conflicts_prefer(magrittr::is_in)
+
+```
+
+```{r local-setting}
+
+#To pass if interactive
+#rendering <- TRUE
+#time_all <- proc.time()
+
+source("./scripts_gal/misc_funs.R")
+
+dir_data <- "./data/"
+
+if (!dir.exists(dir_data)) {
+  dir.create(dir_data)
+}
+
+```
+
+# Simple exponential smoothing revisited
+
+Let's introduce the "level" or "smoothed value" at time $t$ at the weighted average of the actual and the forecasts at same time $t$:
+\begin{equation}
+a(t) = \alpha d(t) + (1-\alpha)a(t-1)
+\end{equation}
+
+So curve $a(t)$ is the smoothed version of $d(t)$, with exponential-kernel smoothing.
+We saw last time that simple exponential smoothing forecasting is the naive forecast of $a(t)$, namely $f(t+1) = a(t)$.
+
+## Signal and noise
+
+We also saw that we use a weighted average of the actual and the forecast because we do not completely trust the actual.
+
+So, we can see both the actual observation $d(t)$ and the forecast $f(t)$ as both a signal $s(t)$ plus some random component (different for the actual and the forecast):
+\begin{align*}
+d(t) &= s(t) + \eta \\
+f(t) &= s(t) + \epsilon
+\end{align*}
+With $\eta$ some noise with variance $V_\eta$ and $\epsilon$ some other noise (with possibly a completely different distribution) with variance $V_\epsilon$.
+So the variance of $a(t)$ is a function of $\alpha$:
+\begin{equation}
+V(\alpha) = \alpha^2V_\eta + (1 - \alpha)^2 V_\epsilon
+\end{equation}
+Minimizing $V(\alpha)$ yields:
+\begin{equation}
+\alpha = \frac{V_\epsilon}{V_\epsilon + V_\eta}
+\end{equation}
+Of course, since usually we do not know $V_\epsilon$ and $V_\eta$, this should be seen as an explanatory point of view for the moment.
+For the moment we will limit ourselves to playing with $\alpha$ to get a satisfactory result.
+But once $\alpha$ satisfactorily chosen, it can be viewed as the ratio above, linking the variances of $d(t)$ and $f(t)$.
+
+# Double exponential smoothing (trend estimation)
+
+We have seen that we can de-trend by differencing.
+For example for a linear trend differencing only once is enough:
+
+\begin{align*}
+d(t)   &= b_0 + b_1 t + \epsilon \\
+d(t-1) &= b_0 + b_1 (t-1) + \epsilon
+\end{align*}
+Therefore
+\begin{equation}
+c(t) = d(t) - d(t-1) = b_1 + \epsilon'
+\end{equation}
+Where for the variances we have $V(\epsilon') = 2 V(\epsilon)$.
+We see that averaging all the differences $E(c(t))$ should yield a good estimate of the slope $b_1$ of the linear trend.
+But we have just seen that with a well chosen $\alpha$ we can have a smoothed version $a(t)$ of $d(t)$ with smaller variance.
+This means that we can better estimate $b_1$ by averaging the differences $a(t) - a(t-1)$.
+This would work well for a linear trend, but for a non-linear trend, that is smoothly evolving, we might want to put more emphasis (more weight when averaging) on the recent differences than on the past ones.
+For example we can use an exponentially weighted average, which, as we have seen last time is convenient since we can express it recursively:
+\begin{equation}
+b(t) = \beta (a(t) - a(t-1)) + (1 - \beta) b(t-1)
+\end{equation}
+Here $b(t)$ represents the estimated increase in trend from time $t-1$ to time $t$.
+Now we can put the level and the trend together.
+A little less naively than than just taking the smoothed value from time $t$ as our forecast at time $t+1$, we can take the smoothed value plus the estimated trend:
+\begin{equation}
+f(t+1) = a(t) + b(t)
+\end{equation}
+With the two intertwined other recurrence formulae:
+\begin{align*}
+a(t) &= \alpha d(t) + (1-\alpha) (a(t-1) + b(t-1))\\
+b(t) &= \beta (a(t) - a(t-1)) + (1-\beta) b(t-1)
+\end{align*}
+
+## Further horizons
+
+If we are at time $t$ and want to forecast at time $t+2$, we just pretend that $d(t+1) = f(t+1)$ and we get:
+\begin{align*}
+a(t+1) &= \alpha f(t+1) + (1 - \alpha) f(t+1) \\
+       &= f(t+1) \\
+       &= a(t) + b(t)
+\end{align*}
+So
+\begin{align*}
+b(t+1) &= \beta b(t) + (1-\beta) b(t) \\
+       &= b(t)
+\end{align*}
+Now, when replaced in the equation for $f(t+2)$ we get:
+\begin{align*}
+f(t+2)  &= a(t+1) + b(t+1) \\
+        &= a(t) + 2 b(t)
+\end{align*}
+Continuing that way we see that at horizon $k$ we have:
+\begin{equation}
+f(t + k) = a(t) + k b(t)
+\end{equation}
+
+## Multiplicative vs Additive trend
+
+So far we have seen additive trend.
+But sometimes it makes sense to consider multiplicative trend:
+
+\begin{equation}
+f(t+1) = a(t) * b(t)
+\end{equation}
+
+In that case the trend can be approximated by dividing, not differencing.
+Instead of
+\begin{equation}
+d(t) = d(t-1) + b_1 + \epsilon
+\end{equation}
+We have
+\begin{equation}
+d(t) = d(t-1) * b_1 + \epsilon
+\end{equation}
+Here again we get a better result by using the smoothed version of the actuals $b_1 \approx \frac{a(t)}{a(t-1)}$.
+Again, we take a weighted version of this and the previous trend:
+\begin{equation}
+b(t) = \beta \frac{a(t)}{a(t-1)} + (1 - \beta) b(t-1)
+\end{equation}
+Now, the recurrence relation for the smoothing becomes:
+\begin{equation}
+a(t) = \alpha d(t) + (1-\alpha) (a(t-1) * b(t-1))
+\end{equation}
+
+For higher horizons we now get:
+\begin{equation}
+f(t+k) = a(t) * b(t)^k
+\end{equation}
+
+## Initialization
+
+For the first values we usually take:
+\begin{align*}
+a(0) &= d(0) \\
+b(0) &= d(1) - d(0)
+\end{align*}
+
+# Damping the trend
+
+One problem with the trend as defined above is that it never stops for larger and larger horizons.
+To palliate that, we can force formula to forget the trend with a "memory factor" $0 < \phi < 1$:
+\begin{align*}
+a(t) &= \alpha d(t) + (1-\alpha)(a(t-1) + \phi b(t-1)) \\
+b(t) &= \beta (a(t) - a(t-1)) + (1-\beta) \phi b(t-1)
+\end{align*}
+So the forecast becomes:
+\begin{equation*}
+f(t+1) = a(t) + \phi b(t)
+\end{equation*}
+
+More generally, at horizon $k$, we get:
+\begin{equation*}
+f(t+k) = a(t) + (\phi + \phi^2 + \dots + \phi^k) b(t)
+\end{equation*}
+
+# Hands on data!
+
+Let's implement double exponential smoothing.
+We first load our usual synthetic data:
+
+```{r load-synthetic-data}
+
+fpath_ts2 <- glue("{dir_data}synthetic_TS_02.tsv")
+df_ts2 <- 
+  read_tsv(fpath_ts2) %>% 
+  select(year, day, y_2) %>%
+  mutate(day_noy = format(day, "0000-%m-%d") %>% as_date) %>% #date with no year
+  relocate(day_noy, .after = day) %>%
+  rename(d_t = y_2)
+
+df_ts2
+
+```
+
+Just to make it a little less erratic on a daily basis, let's transform the actuals by a moving average of length 3.
+
+```{r ma-y2}
+
+df_ts2 %<>%
+  mutate(d_t = d_t + lag(d_t, default = 0) + lead(d_t, default = 0))
+
+df_ts2
+
+alf = 0.4
+bet = 0.6
+phi  = 0.8
+
+```
+
+Let's use the following parameters:
+
+* $\alpha = `r alf`$
+* $\beta = `r bet`$
+* $\phi = `r phi`$
+
+And let's forecast for 2024 and 2025, first without dampening factor ($\phi$) and additively:
+
+```{r fcast-des}
+
+df_ts2 %<>%
+  mutate(a_t = -1,
+         b_t = -1)
+
+df_ts2$a_t[1] <- df_ts2$d_t[1]
+df_ts2$b_t[1] <- df_ts2$d_t[2] - df_ts2$d_t[1]
+
+for (i in 2:nrow(df_ts2)) {
+  df_ts2$a_t[i] <- alf * df_ts2$d_t[i-1] + (1-alf) * (df_ts2$a_t[i-1] + df_ts2$b_t[i-1])
+  df_ts2$b_t[i] <- bet * (df_ts2$a_t[i] - df_ts2$a_t[i-1]) + (1-bet) * df_ts2$b_t[i-1]
+}
+
+df_ts2 %<>%
+  mutate(f_ses = lag(a_t),
+         f_des = lag(a_t) + lag(b_t))
+
+year_1 <- 2024
+
+df_ts2 %<>%
+  pivot_longer(cols = c(f_ses, f_des),
+               names_to = "es_type",
+               values_to = "fcast",
+               names_prefix = "f_") 
+
+df_ts2 %>%
+  filter(year == year_1) %>%
+  ggplot(aes(x = day, y = fcast)) +
+    geom_line(aes(y = d_t), color = "black") +
+    geom_line(aes(color = es_type))
+
+```
+
+Difficult to see which is better.
+Let's compute some KPI accuracy over year `r year_1`, for example WAPE.
+Recall:
+
+\begin{equation}
+\mathrm{WAPE} = \frac{\sum |f(t) - d(t)|}{\sum d(t)}
+\end{equation}
+
+```{r compute-wape}
+
+df_ts2 %>%
+  mutate(err = fcast - d_t) %>%
+  group_by(year, es_type) %>%
+  reframe(wape = sum(abs(err), na.rm = TRUE) / sum(d_t) * 100) %>%
+  pivot_wider(names_from = es_type,
+              values_from = wape)
+
+```
+
+# Homeworks
+
+::: {#imp-hwk1 .callout-important}
+## To do at home
+
+Divide the $(\alpha, \beta)$ parameter space into about 100 values (10 for alpha, 10 for \beta).
+Then do a grid search for the best parameters with respect to WAPE both for SES and DES.
+:::
+
+```{r homework1-grid-search}
+#| code-fold: false
+#| eval: true
+
+# --- 1. ENSURE df_ts2 has 'year' and 'd_t' -------------------------------
+if (!"year" %in% names(df_ts2)) {
+  df_ts2 <- df_ts2 %>% mutate(year = as.integer(format(day, "%Y")))
+}
+stopifnot(all(c("day", "year", "d_t") %in% names(df_ts2)))
+
+# --- 2. DEBUG: Print structure of df_ts2 ---------------------------------
+cat("df_ts2 columns:", paste(names(df_ts2), collapse = ", "), "\n")
+cat("First 3 rows:\n")
+print(head(df_ts2, 3))
+
+# --- 3. HELPER: Double Exponential Smoothing (FORCED TIBBLE) -------------
+compute_des <- function(df, alpha, beta, phi = 1) {
+  n <- nrow(df)
+  a <- numeric(n)
+  b <- numeric(n)
+
+  # Initialize
+  a[1] <- df$d_t[1]
+  b[1] <- df$d_t[2] - df$d_t[1]
+
+  # Recursion
+  for (i in 2:n) {
+    a[i] <- alpha * df$d_t[i] + (1 - alpha) * (a[i-1] + phi * b[i-1])
+    b[i] <- beta * (a[i] - a[i-1]) + (1 - beta) * phi * b[i-1]
+  }
+
+  f <- a + phi * b
+  f <- c(NA, f[-n])  # one-step-ahead
+
+  # --- FORCE TIBBLE with all columns ---
+  result <- tibble(
+    day   = df$day,
+    year  = df$year,
+    d_t   = df$d_t,
+    a_t   = a,
+    b_t   = b,
+    f_des = f,
+    alpha = alpha,
+    beta  = beta,
+    phi   = phi
+  )
+
+  # --- DEBUG: Check output ---
+  if (nrow(result) != nrow(df)) {
+    stop("compute_des: row count mismatch!")
+  }
+  if (!all(c("year", "d_t", "f_des") %in% names(result))) {
+    stop("compute_des: missing required columns!")
+  }
+
+  return(result)
+}
+
+# --- 4. SES helper -------------------------------------------------------
+compute_ses <- function(df, alpha) {
+  compute_des(df, alpha = alpha, beta = 0, phi = 1)
+}
+
+# --- 5. WAPE -------------------------------------------------------------
+wape <- function(actual, forecast) {
+  sum(abs(actual - forecast), na.rm = TRUE) / sum(actual, na.rm = TRUE) * 100
+}
+
+# --- 6. Grid search ------------------------------------------------------
+alpha_vals <- seq(0.05, 0.95, length.out = 10)
+beta_vals  <- seq(0.05, 0.95, length.out = 10)
+
+grid_res <- expand.grid(
+  alpha = alpha_vals,
+  beta  = beta_vals,
+  type  = c("SES", "DES"),
+  stringsAsFactors = FALSE
+) %>%
+  rowwise() %>%
+  mutate(
+    # Compute forecast
+    df_fcast = list(
+      if (type == "SES") compute_ses(df_ts2, alpha)
+      else               compute_des(df_ts2, alpha, beta, phi = 1)
+    ),
+    # --- DEBUG: Print type and structure of df_fcast[[1]] ---
+    debug_info = {
+      fc <- df_fcast[[1]]
+      cat("\n--- Row:", cur_group_id(), "| type:", type, 
+          "| alpha:", alpha, "| beta:", beta, "---\n")
+      cat("Class of fc:", class(fc), "\n")
+      cat("Columns in fc:", paste(names(fc), collapse = ", "), "\n")
+      cat("First row:\n")
+      print(head(fc, 1))
+      "debug printed"
+    },
+    # --- Compute WAPE only on 2024 ---
+    wape_2024 = {
+      fc <- df_fcast[[1]]
+      if (!"year" %in% names(fc)) stop("year column missing in forecast!")
+      fc_2024 <- fc %>% filter(year == 2024)
+      if (nrow(fc_2024) == 0) return(NA)
+      wape(fc_2024$d_t, fc_2024$f_des)
+    }
+  ) %>%
+  ungroup() %>%
+  select(-debug_info)  # remove debug column from final output
+
+# --- 7. Best parameters --------------------------------------------------
+best_params <- grid_res %>%
+  group_by(type) %>%
+  slice_min(wape_2024, n = 1, with_ties = FALSE) %>%
+  select(type, alpha, beta, wape_2024) %>%
+  mutate(across(c(alpha, beta, wape_2024), ~round(.x, 3)))
+
+best_params
+```
+
+::: {#imp-hwk2 .callout-important}
+## To do at home
+
+Implement DESD, Double Exponential Smoothing forecasting with trend Dampening factor $phi = 1, 0.8, 0.5$ for horizon 7 (one week) with the values of $(\alpha, \beta)$ found in [Hwk @imp-hwk1].
+Plot and compute the WAPE for comparison.
+:::
+
+```{r}
+## --------------------------------------------------------------
+##  HOMEWORK 2 – DES with damping (phi = 1, 0.8, 0.5)
+## --------------------------------------------------------------
+
+# Extract best α, β for DES (the one with lowest WAPE)
+alpha_best <- best_params %>% filter(type == "DES") %>% pull(alpha)
+beta_best  <- best_params %>% filter(type == "DES") %>% pull(beta)
+
+phi_vals <- c(1.0, 0.8, 0.5)
+
+des_damped <- map_dfr(phi_vals, ~{
+  compute_des(df_ts2, alpha = alpha_best, beta = beta_best, phi = .x) %>%
+    mutate(phi = .x)
+})
+
+# ---- 7-day ahead forecasts (horizon = 7) -------------------------
+des_7ahead <- des_damped %>%
+  group_by(phi) %>%
+  mutate(
+    f7 = a_t + (phi + phi^2 + phi^3 + phi^4 + phi^5 + phi^6 + phi^7) * b_t
+  ) %>%
+  ungroup() %>%
+  select(day, year, d_t, phi, f7)
+
+# ---- Plot 7-day forecasts (only 2024 for readability) ----------
+des_7ahead %>%
+  filter(year == 2024) %>%
+  ggplot(aes(x = day)) +
+  geom_line(aes(y = d_t), colour = "black", linetype = "solid") +
+  geom_line(aes(y = f7, colour = factor(phi)), size = 0.8) +
+  scale_colour_viridis_d(name = "phi") +
+  labs(
+    title = "7-day ahead DES forecasts (best α,β) – 2024",
+    x = "Day", y = "Value"
+  ) +
+  theme_minimal()
+
+# ---- WAPE for the 7-day forecasts --------------------------------
+des_7ahead %>%
+  filter(year == 2024) %>%
+  group_by(phi) %>%
+  summarise(wape_7 = wape(d_t, f7), .groups = "drop") %>%
+  knitr::kable(col.names = c("phi", "WAPE (7-day ahead) %"),
+               digits = 2)
+```
+
+
