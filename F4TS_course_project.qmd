@@ -386,32 +386,472 @@ This suggests that aggregating reduces noise and makes seasonal patterns more de
 
 
 
-# Self-Coded Triple Exponential Smoothing
-
-- Implementation of TES (additive & multiplicative)
-
-- Initialization methods
-
-- Parameter optimization (grid search + optim)
-
-- Horizon-1 forecasting functions
-
-
-
 # Part I – Forecasting Comparison
+
+We compare two approaches on the last 4 weeks:
+
+1. Direct forecasting at item level (Store 10 – Dept 10)  
+
+2. Forecasting at store level (Store 10 total) → proportional de-aggregation to item level
+
+Both methods use self-implemented Triple Exponential Smoothing (Holt-Winters).
+
+## Self-implemented TSE functions
+
+```{r tse_functions}
+# ── Level-only: Simple Exponential Smoothing (SES) ───────────────────────
+ses_level <- function(y, alpha, l0 = NULL) {
+  n <- length(y)
+  l <- numeric(n)
+  l[1] <- if (is.null(l0)) y[1] else l0
+  for (t in 2:n) {
+    l[t] <- alpha * y[t] + (1 - alpha) * l[t-1]
+  }
+  l
+}
+
+ses_forecast1 <- function(l, alpha) {
+  l[length(l)]   # horizon 1 forecast = last smoothed level
+}
+
+# ── Level + Trend: Double Exponential Smoothing (Holt) ───────────────────
+des <- function(y, alpha, beta, l0 = NULL, b0 = NULL, damped = FALSE, phi = 1) {
+  n <- length(y)
+  l <- b <- numeric(n)
+  
+  # Initialization (simple heuristic from course)
+  l[1] <- if (is.null(l0)) y[1] else l0
+  b[1] <- if (is.null(b0)) y[2] - y[1] else b0
+  
+  for (t in 2:n) {
+    l[t] <- alpha * y[t] + (1 - alpha) * (l[t-1] + phi * b[t-1])
+    b[t] <- beta  * (l[t] - l[t-1]) + (1 - beta) * phi * b[t-1]
+  }
+  
+  list(level = l, trend = b)
+}
+
+des_forecast1 <- function(fit, phi = 1) {
+  last_l <- tail(fit$level, 1)
+  last_b <- tail(fit$trend, 1)
+  last_l + phi * last_b
+}
+
+# ── Full TES (Holt-Winters) - additive version ───────────────────────────
+tes_additive <- function(y, alpha, beta, gamma, period = 52, 
+                         l0 = NULL, b0 = NULL, s0 = NULL, damped = FALSE, phi = 1) {
+  n <- length(y)
+  l <- b <- s <- numeric(n)
+  
+  # Initialization (course style: average first period for seasonal)
+  if (is.null(l0)) l0 <- mean(y[1:period])
+  if (is.null(b0)) b0 <- (mean(y[(period+1):(2*period)]) - mean(y[1:period])) / period
+  if (is.null(s0)) s0 <- y[1:period] - l0
+  
+  l[1] <- l0
+  b[1] <- b0
+  s[1:period] <- s0
+  
+  for (t in (period + 1):n) {
+    l[t] <- alpha * (y[t] - s[t-period]) + (1 - alpha) * (l[t-1] + phi * b[t-1])
+    b[t] <- beta  * (l[t] - l[t-1]) + (1 - beta) * phi * b[t-1]
+    s[t] <- gamma * (y[t] - l[t]) + (1 - gamma) * s[t-period]
+  }
+  
+  list(level = l, trend = b, season = s)
+}
+
+tes_add_forecast1 <- function(fit, period = 52, phi = 1) {
+  last_l <- tail(fit$level, 1)
+  last_b <- tail(fit$trend, 1)
+  m <- length(fit$season)
+  next_season_idx <- ((m - 1) %% period) + 1
+  next_s <- fit$season[next_season_idx]
+  last_l + phi * last_b + next_s
+}
+
+# ── TES Multiplicative version ───────────────────────────────────────────
+
+tes_multiplicative <- function(y, alpha, beta, gamma, period = 52,
+                               l0 = NULL, b0 = NULL, s0 = NULL,
+                               damped = FALSE, phi = 1) {
+  n <- length(y)
+  if (n < period + 1) stop("Series too short for seasonal model (need > period + 1 points)")
+  l <- b <- s <- numeric(n)
+  
+  # Initialization (common heuristic)
+  if (is.null(l0)) l0 <- mean(y[1:period], na.rm = TRUE)
+  if (any(s0 <= 0)) {
+  warning("Zero or negative seasonal components detected – replacing with small value")
+  s0[s0 <= 0] <- 1e-6
+  }
+  if (is.null(b0)) b0 <- (mean(y[(period+1):(2*period)]) - mean(y[1:period])) / period
+  if (is.null(s0)) s0 <- y[1:period] / l0                     # ← key difference
+  
+  l[1] <- l0
+  b[1] <- b0
+  s[1:period] <- s0
+  
+  for (t in (period + 1):n) {
+    l[t] <- alpha * (y[t] / s[t - period]) + (1 - alpha) * (l[t-1] + phi * b[t-1])
+    b[t] <- beta  * (l[t] - l[t-1])            + (1 - beta)  * phi * b[t-1]
+    s[t] <- gamma * (y[t] / l[t])              + (1 - gamma) * s[t - period]
+  }
+  
+  list(level = l, trend = b, season = s)
+}
+
+# One-step forecast
+tes_multi_forecast1 <- function(fit, period = 52, phi = 1) {
+  last_l <- tail(fit$level,  1)
+  last_b <- tail(fit$trend,  1)
+  m <- length(fit$season)
+  next_season_idx <- ((m - 1) %% period) + 1
+  next_s <- fit$season[next_season_idx]
+  
+  (last_l + phi * last_b) * next_s
+}
+
+# SSE objective for TES additive
+sse_tes_add <- function(params, y, period = 52, damped = FALSE, phi = 1) {
+  alpha <- params[1]; beta <- params[2]; gamma <- params[3]
+  if (any(c(alpha, beta, gamma) <= 0) || any(c(alpha, beta, gamma) >= 1)) return(Inf)
+
+  fit <- tes_additive(y, alpha, beta, gamma, period, damped = damped, phi = phi)
+  errors <- y - (fit$level + fit$trend * phi + fit$season)   # in-sample one-step errors
+  sum(errors^2, na.rm = TRUE)
+}
+
+sse_tes_multi <- function(params, y, period = 52, phi = 1) {
+  alpha <- params[1]; beta <- params[2]; gamma <- params[3]
+  if (any(c(alpha, beta, gamma) <= 0) || any(c(alpha, beta, gamma) >= 1)) return(Inf)
+  
+  fit <- tes_multiplicative(y, alpha, beta, gamma, period, phi = phi)
+  
+  # One-step fitted values
+  fitted <- numeric(length(y))
+  for (t in 1:length(y)) {
+    s_idx <- ((t - 1) %% period) + 1
+    fitted[t] <- (fit$level[t] + phi * fit$trend[t]) * fit$season[s_idx]
+  }
+  
+  errors <- y - fitted
+  sum(errors^2, na.rm = TRUE)
+}
+
+# Grid search example (coarse)
+grid_search_tes_add <- function(y, period = 52) {
+  cat("Starting grid search (additive)...\n")
+  
+  alphas <- seq(0.1, 0.9, 0.1)
+  betas  <- seq(0.01, 0.5, 0.05)
+  gammas <- seq(0.1, 0.8, 0.1)
+  
+  best_sse <- Inf
+  best_par <- c(0.5, 0.1, 0.3)
+  
+  for (a in alphas) for (b in betas) for (g in gammas) {
+    sse <- sse_tes_add(c(a,b,g), y, period)
+    if (sse < best_sse) {
+      best_sse <- sse
+      best_par <- c(a,b,g)
+    }
+  }
+  list(alpha = best_par[1], beta = best_par[2], gamma = best_par[3], sse = best_sse)
+}
+
+grid_search_tes_multi <- function(y, period = 52) {
+  cat("Starting grid search (multiplicative)...\n")
+  
+  alphas <- seq(0.1, 0.9, 0.1)
+  betas  <- seq(0.01, 0.5, 0.05)
+  gammas <- seq(0.1, 0.8, 0.1)
+  
+  best_sse <- Inf
+  best_par <- c(0.5, 0.1, 0.3)
+  
+  for (a in alphas) for (b in betas) for (g in gammas) {
+    sse <- sse_tes_multi(c(a,b,g), y, period)
+    if (sse < best_sse) {
+      best_sse <- sse
+      best_par <- c(a,b,g)
+    }
+  }
+  list(alpha = best_par[1], beta = best_par[2], gamma = best_par[3], sse = best_sse)
+}
+
+# Rolling horizon-1 forecasts – generic for any fitted TSE model
+rolling_h1_forecasts <- function(data, y_var = "y", period = 52,
+                                 params, model = "multi", phi = 1) {
+  
+  eval_weeks <- tail(unique(data$Week), 4)
+  results <- tibble(Week = eval_weeks, Actual = NA_real_, Forecast = NA_real_)
+  
+  for (i in seq_along(eval_weeks)) {
+    train <- data |> filter(Week < eval_weeks[i])
+    y_train <- train[[y_var]]
+    
+    
+    if (model == "add") {
+      fit <- tes_additive(y_train, params$alpha, params$beta, params$gamma,
+                          period = period, phi = phi)
+      f1 <- tes_add_forecast1(fit, period = period, phi = phi)   # ← add period here
+    } else {
+      fit <- tes_multiplicative(y_train, params$alpha, params$beta, params$gamma,
+                                period = period, phi = phi)
+      f1 <- tes_multi_forecast1(fit, period = period, phi = phi)
+    }
+    
+    actual <- data |> filter(Week == eval_weeks[i]) |> pull({{y_var}})
+    
+    results$Actual[i]   <- actual
+    results$Forecast[i] <- f1
+  }
+  
+  results |> mutate(Error = Actual - Forecast)
+}
+```
 
 
 ## Method 1: Direct forecasting at Store-Dept level
 
+```{r item_series}
+# ── Prepare the series for Store 10 – Dept 10 ────────────────────────────────
+item_series <- item_ts |>
+  filter(Store == 10, Dept == 10) |>
+  mutate(y = Weekly_Sales) |>
+  select(Week, y, IsHoliday) |>
+  as_tibble()   # easier for fitting
+
+# Quick check
+glimpse(item_series)
+```
+
+### Parameter Optimization
+
+```{r parameter_optimization}
+# Optimize parameters using multiplicative model
+params_item_multi <- grid_search_tes_multi(item_series$y, period = 52)
+
+# Show results
+cat("Best parameters (multiplicative) for Store 10 – Dept 10:\n")
+print(params_item_multi)
+
+# Optional: also try additive for comparison
+params_item_add <- grid_search_tes_add(item_series$y, period = 52)
+cat("\nBest parameters (additive) for Store 10 – Dept 10:\n")
+print(params_item_add)
+```
+
+### Rolling Horizon-1 Forecasts
+
+```{r horizon_1_forecast}
+# Rolling forecasts – multiplicative version
+fc_direct_multi <- rolling_h1_forecasts(
+  data   = item_series,
+  y_var  = "y",
+  period = 52,
+  params = params_item_multi,
+  model  = "multi",
+  phi    = 1
+)
+
+# Additive version
+fc_direct_add <- rolling_h1_forecasts(
+  data   = item_series,
+  y_var  = "y",
+  period = 52,
+  params = params_item_add,
+  model  = "add",
+  phi    = 1
+)
+
+# Combine for comparison
+fc_compare <- bind_rows(
+  fc_direct_multi |> mutate(Model = "Multiplicative"),
+  fc_direct_add   |> mutate(Model = "Additive")
+)
+```
+
+### Visual Check
+
+```{r visual_check}
+# Plot comparison
+ggplot(fc_compare, aes(x = Week)) +
+  geom_line(aes(y = Actual, color = "Actual"), linewidth = 0.9) +
+  geom_point(aes(y = Forecast, color = Model), size = 2.5) +
+  geom_line(aes(y = Forecast, color = Model), linetype = "dashed") +
+  scale_color_manual(values = c("Actual" = "black", "Multiplicative" = "red", "Additive" = "blue")) +
+  labs(
+    title = "Direct forecasting – Additive vs Multiplicative",
+    subtitle = "Store 10 – Dept 10 | Last 4 weeks",
+    y = "Weekly Sales"
+  ) +
+  theme_minimal()
+```
+
+### Accuracy Evaluation
+
+```{r accuracy_comparison}
+# Accuracy comparison table
+accuracy_compare <- fc_compare |>
+  group_by(Model) |>
+  summarise(
+    MAE  = mean(abs(Error), na.rm = TRUE),
+    WAPE = sum(abs(Error), na.rm = TRUE) / sum(Actual, na.rm = TRUE) * 100,
+    MAPE = mean(abs(Error / Actual), na.rm = TRUE) * 100,
+    RMSE = sqrt(mean(Error^2, na.rm = TRUE))
+  ) |>
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+knitr::kable(accuracy_compare, caption = "Method 1 – Additive vs Multiplicative")
+```
+
 
 ## Method 2: Aggregate → Forecast → Proportional de-aggregation
 
+```{r aggregated_series}
+# Prepare aggregate series (Store 10 total sales)
+store_series <- store_ts |>
+  filter(Store == 10) |>
+  mutate(y = Total_Sales) |>
+  select(Week, y, IsHoliday) |>
+  as_tibble()
 
-## Accuracy evaluation (WAPE, MAPE, MedAPE)
+cat("Store 10 total series length:", nrow(store_series), "weeks\n")
+```
+
+## Parameter Optimization
+
+```{r agg_para_opti}
+# multiplicative (stronger seasonality at aggregate level)
+params_store_multi <- grid_search_tes_multi(store_series$y, period = 52)
+
+cat("Best parameters (multiplicative) for Store 10 total:\n")
+print(params_store_multi)
+
+# Additive for comparison
+params_store_add <- grid_search_tes_add(store_series$y, period = 52)
+cat("\nBest parameters (additive):\n")
+print(params_store_add)
+```
+
+## Rolling Horizon-1 Forecast
+
+```{r agg_horizon_1_forecast}
+# Rolling horizon-1 forecasts on aggregate level – use multiplicative
+fc_aggregate_multi <- rolling_h1_forecasts(
+  data   = store_series,
+  y_var  = "y",
+  period = 52,
+  params = params_store_multi,
+  model  = "multi",
+  phi    = 1
+)
+```
+
+
+## Proportional De-aggregation
+
+```{r de_aggregation}
+# Historical average proportion of Dept 10 in Store 10 total
+prop_dept10 <- item_series |>
+  left_join(store_series |> select(Week, Total = y), by = "Week") |>
+  summarise(prop = mean(y / Total, na.rm = TRUE)) |>
+  pull(prop)
+
+cat("Historical average share of Dept 10 in Store 10 total:", round(prop_dept10, 4), "\n")
+
+# Apply proportion to aggregate forecasts
+fc_aggregate_deagg <- fc_aggregate_multi |>
+  mutate(
+    Forecast_item = Forecast * prop_dept10,
+    Actual_item   = item_series |> 
+      filter(Week %in% fc_aggregate_multi$Week) |> 
+      pull(y)
+  ) |>
+  rename(Forecast_aggregate = Forecast) |>
+  select(Week, Actual_item, Forecast_item, everything())
+
+# Rename for clarity
+fc_aggregate_deagg <- fc_aggregate_deagg |>
+  select(
+    Week,
+    Actual   = Actual_item,
+    Forecast = Forecast_item,
+    Forecast_agg = Forecast_aggregate,
+    Actual_agg   = Actual,
+    Error_agg    = Error
+  )
+```
+
+## Visual Check
+
+```{r agg_visual_check}
+# Combine Method 1 (direct) and Method 2 (aggregate → de-agg)
+comparison <- bind_rows(
+  fc_direct_multi |> mutate(Method = "Direct (item level)"),
+  fc_aggregate_deagg |> mutate(Method = "Aggregate → de-agg")
+)
+
+ggplot(comparison, aes(x = Week)) +
+  geom_line(aes(y = Actual, color = "Actual"), linewidth = 0.9) +
+  geom_point(aes(y = Forecast, color = Method), size = 2.5) +
+  geom_line(aes(y = Forecast, color = Method), linetype = "dashed") +
+  labs(
+    title = "Part I – Forecasting comparison (last 4 weeks)",
+    subtitle = "Store 10 – Dept 10 | Horizon-1 | TES Multiplicative",
+    y = "Weekly Sales ($)",
+    color = "Method"
+  ) +
+  scale_color_manual(values = c(
+    "Actual"              = "black",
+    "Direct (item level)" = "#e74c3c",
+    "Aggregate → de-agg"  = "#27ae60"
+  )) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+## Accuracy Evaluation
+
+```{r agg_evaluation}
+accuracy_final <- comparison |>
+  group_by(Method) |>
+  summarise(
+    MAE   = mean(abs(Actual - Forecast), na.rm = TRUE),
+    WAPE  = sum(abs(Actual - Forecast), na.rm = TRUE) / sum(Actual, na.rm = TRUE) * 100,
+    MAPE  = mean(abs((Actual - Forecast)/Actual), na.rm = TRUE) * 100,
+    RMSE  = sqrt(mean((Actual - Forecast)^2, na.rm = TRUE)),
+    .groups = "drop"
+  ) |>
+  mutate(across(where(is.numeric), ~round(., 2)))
+
+knitr::kable(accuracy_final, 
+             caption = "Part I – Accuracy comparison on last 4 weeks")
+```
 
 
 ## Comparison & conclusion
 
+We compared two horizon-1 forecasting approaches for Store 10 – Dept 10 using self-implemented Triple Exponential Smoothing (multiplicative):
+
+1. **Direct method**: TES fitted directly on the item-level series (noisy, irregular seasonality).
+
+2. **Aggregate → de-aggregate method**: TES fitted on Store 10 total sales (cleaner, stronger seasonality), then proportionally de-aggregated using the historical average share of Dept 10.
+
+**Observation**  
+Contrary to the typical expectation, the aggregate-then-deaggregate approach did **not** improve accuracy compared to direct item-level forecasting in this specific case.
+
+**Possible reasons**  
+- The chosen item (Store 10 – Dept 10) may have department-specific patterns or promotions that are **not well captured** by the simple average proportion from the whole store.  
+- The noise level at item level, while high, may still contain useful local signals that are lost when aggregating.  
+- The historical proportion used for de-aggregation is static and may not adapt well to recent changes in department contribution.  
+- Parameter optimization and model choice (multiplicative) worked reasonably on both levels, but the short evaluation period (only 4 weeks) makes results sensitive to individual holiday or promotion effects.
+
+**Conclusion**  
+In this particular Store–Dept combination, direct forecasting at the item level performed better (lower WAPE/MAE). This highlights that aggregation benefits are **not automatic** — they depend on how representative the aggregate series is of the target item and on the quality of the disaggregation step. For more robust conclusions, one could test multiple items, use dynamic proportions, or apply bottom-up/top-down reconciliation methods (beyond the scope of this project).
 
 # Part II – Rebate Optimization
 
