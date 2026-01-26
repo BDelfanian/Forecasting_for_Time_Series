@@ -1,0 +1,438 @@
+---
+title: "F4SC End-of-Semester Project – Forecasting Walmart Weekly Sales"
+subtitle: "Part I: Direct vs Aggregate-then-Deaggregate Forecasting (Horizon-1)"
+author: "Behrouz Delfanian, Hesam Korki"
+date: "28 January 2026"
+format: 
+  html:
+    code-fold: true
+    code-overflow: scroll
+    code-line-numbers: true
+    code-tools: true
+    df_print: paged
+    toc: true
+    toc-location: left
+    toc-depth: 3
+    smooth-scroll: true
+    embed-resources: true
+    theme: cosmo
+---
+
+# Setup and Environment
+
+## Required Libraries
+
+```{r librairies-to-install}
+#| cache: true
+#| output: false
+cran_repo <- "https://ftp.fau.de/cran"
+list_Rpack2use <-
+  c("rmarkdown",
+    "conflicted",
+    "devtools",
+    "knitr",
+    "quarto",
+    "bookdown",
+    "DT",
+    "Hmisc",
+    "tidyverse",
+    "magrittr",
+    "lubridate",
+    "hms",
+    "glue",
+    "skimr",
+    "lobstr",
+    "janitor",
+    "zeallot",
+    "stringi",
+    "lemon",
+    "crayon",
+    "jsonlite",
+    "TSA",
+    "tsibble",
+    "fable",
+    "feasts",
+    "imputeTS",
+    "readxl",
+    "slider",
+    "reticulate",
+    "aws.s3",
+    "paws",
+    "RAthena",
+    "botor",
+    "RPostgres",
+    "DBI",
+    "RJDBC",
+    "dbplyr",
+    "arrow",
+    "geosphere",
+    "viridis")
+
+list_installed_packages <- names(installed.packages()[,2])
+for (Rpack in list_Rpack2use) {
+  if (! Rpack %in% list_installed_packages) {
+    print(paste("Installing", Rpack))
+    install.packages(Rpack, repos = cran_repo, )
+  } else {
+    print(paste(Rpack, "already installed."))
+  }
+}
+
+```
+
+## Load Libraries & Resolve Conflicts
+
+```{r librairies-to-load}
+#| cache: false
+
+list_Rpack2load_not <-
+  c("conflicted",
+    "devtools",
+    "paws",
+    "RAthena",
+    "botor",
+    "arrow",
+    "RPostgres",
+    "DBI",
+    "RJDBC",
+    "dbplyr",
+    "aws.s3",
+    "arrow",
+    "reticulate",
+    "slider",
+    "stringi",
+    "geosphere",
+    "blah")
+list_Rpack2load <- setdiff(list_Rpack2use, list_Rpack2load_not)
+list_Rpack2load
+
+```
+
+```{r loading-libraries}
+#| cache: false
+#| output: false
+  
+for (Rpack in list_Rpack2load) {
+  library(Rpack, character.only = TRUE)
+}
+
+conflicted::conflicts_prefer(pillar::dim_desc)
+conflicted::conflicts_prefer(magrittr::extract)
+conflicted::conflicts_prefer(dplyr::filter)
+conflicted::conflicts_prefer(jsonlite::flatten)
+conflicted::conflicts_prefer(hms::hms)
+conflicted::conflicts_prefer(dbplyr::ident)
+conflicted::conflicts_prefer(lubridate::interval)
+conflicted::conflicts_prefer(dplyr::lag)
+conflicted::conflicts_prefer(readxl::read_xlsx)
+conflicted::conflicts_prefer(magrittr::set_names)
+conflicted::conflicts_prefer(dbplyr::sql)
+conflicted::conflicts_prefer(Hmisc::src)
+conflicted::conflicts_prefer(dplyr::summarize)
+conflicted::conflicts_prefer(magrittr::is_in)
+
+```
+
+# Data Loading & Preparation
+
+## Directory & Data Paths
+
+```{r data_paths}
+
+dir_data <- "./data/Walmart/"
+
+if (!dir.exists(dir_data)) {
+  dir.create(dir_data)
+}
+
+path_train    <- file.path(dir_data, "train.csv")
+path_test     <- file.path(dir_data, "test.csv")
+path_features <- file.path(dir_data, "features.csv")
+path_stores   <- file.path(dir_data, "stores.csv")
+
+```
+
+## Read Raw Data
+
+```{r read_raw_data}
+train_raw <- read_csv(path_train, show_col_types = FALSE)
+test_raw  <- read_csv(path_test,  show_col_types = FALSE)
+features  <- read_csv(path_features, show_col_types = FALSE)
+stores    <- read_csv(path_stores, show_col_types = FALSE)
+```
+
+## Merge Data
+
+```{r data_merging}
+# Convert dates & create key variables
+train <- train_raw |>
+  mutate(
+    Date = ymd(Date),
+    Store_Dept = glue("{Store}-{Dept}"),
+    IsHoliday = as.logical(IsHoliday)
+  ) |>
+  left_join(features |> mutate(Date = ymd(Date)), by = c("Store", "Date", "IsHoliday")) |>
+  left_join(stores, by = "Store") |>
+  as_tsibble(key = Store_Dept, index = Date)
+```
+
+## Check Missing Values
+
+```{r check_missing_values}
+na_pct <- colMeans(is.na(train)) * 100
+na_pct <- na_pct[na_pct > 0]
+
+data.frame(
+  Column = names(na_pct),
+  "NA_Percent" = round(na_pct, 2)
+) |>
+  arrange(desc("NA_Percent"))
+```
+
+## Clean Data
+
+**Markdown1** to **Markdown5** columns represent markdown/promotional discounts (temporary price reductions) applied in each store on a given week. We replace `NA` with `0` (meaning no markdown/promotion that week). We also remove observations with zero or negative values for `Weekly_Sales`.
+
+```{r clean_data}
+train_clean <- train |>
+  mutate(
+    across(starts_with("MarkDown"), ~ replace_na(., 0))
+  )
+
+# Detect problematic sales values
+sales_issues <- train_clean |>
+  summarise(
+    Total_rows          = n(),
+    Negative_sales      = sum(Weekly_Sales < 0, na.rm = TRUE),
+    Zero_sales          = sum(Weekly_Sales == 0, na.rm = TRUE),
+    Negative_or_zero    = sum(Weekly_Sales <= 0, na.rm = TRUE),
+    Pct_negative_or_zero = round(mean(Weekly_Sales <= 0, na.rm = TRUE) * 100, 2)
+  )
+
+print("Sales quality summary:")
+print(sales_issues)
+
+# Remove negative and zero sales (most common and reasonable approach for this project)
+train_clean <- train_clean |>
+  filter(Weekly_Sales > 0)
+
+# Final check
+cat("Rows after removal:", nrow(train_clean), "\n")
+cat("Percentage of rows removed:", 
+    round((nrow(train) - nrow(train_clean)) / nrow(train) * 100, 2), "%\n")
+```
+
+## Train/Test Split
+
+```{r data_split}
+all_dates   <- sort(unique(train_clean$Date))
+cutoff_date <- all_dates[length(all_dates) - 4]
+
+train_set <- train_clean |> filter(Date <= cutoff_date)
+eval_set  <- train_clean |> filter(Date >  cutoff_date)
+
+# Quick verification
+cat("Training weeks: ", n_distinct(train_set$Date), "\n")
+cat("Evaluation weeks: ", n_distinct(eval_set$Date), "\n")
+```
+
+## Different Aggregation Levels
+
+```{r aggregation_levels}
+## Create different aggregation levels for Part I comparison
+
+# 1. Item level (Store × Dept) - direct forecasting
+item_ts <- train_set |>
+  mutate(Week = yearweek(Date)) |>
+  as_tsibble(key = c(Store, Dept), index = Week)
+
+# 2. Store level - aggregate then disaggregate
+store_ts <- train_set |>
+  group_by(Store, Week = yearweek(Date)) |>
+  summarise(
+    Total_Sales = sum(Weekly_Sales, na.rm = TRUE),
+    IsHoliday   = any(IsHoliday),
+    .groups     = "drop"
+  ) |>
+  as_tsibble(key = Store, index = Week)
+
+# 3. Department level
+dept_ts <- train_set |>
+  group_by(Dept, Week = yearweek(Date)) |>
+  summarise(
+    Total_Sales = sum(Weekly_Sales, na.rm = TRUE),
+    IsHoliday   = any(IsHoliday),
+    .groups     = "drop"
+  ) |>
+  as_tsibble(key = Dept, index = Week)
+```
+
+## Quick Overview
+
+```{r quick_overview}
+# Number of series
+n_series <- n_distinct(train$Store_Dept)
+glue("Number of Store-Department time series: {n_series}")
+
+# Time range
+range(train$Date)
+range(train_set$Date)
+range(eval_set$Date)
+```
+
+# Time Series Exploratory Analysis
+
+## Seasonality Comparison
+
+To compare the three time series in a normalized way, we apply **Divide-by-Mean** normalization technique.
+
+```{r visual_comparison}
+# ── Normalized versions for visual comparison ────────────────────────────────
+
+item_10_10_norm <- item_ts |>
+  filter(Store == 10, Dept == 10) |>
+  as_tibble() |>
+  mutate(
+    Sales_norm = Weekly_Sales / mean(Weekly_Sales, na.rm = TRUE),
+    Series     = "Store 10 - Dept 10 (item)"
+  ) |>
+  select(Week, Sales_norm, Series)
+
+store_10_norm <- store_ts |>
+  filter(Store == 10) |>
+  as_tibble() |>
+  mutate(
+    Sales_norm = Total_Sales / mean(Total_Sales, na.rm = TRUE),
+    Series     = "Store 10 - Total (sum over depts)"
+  ) |>
+  select(Week, Sales_norm, Series)
+
+dept_10_norm <- dept_ts |>
+  filter(Dept == 10) |>
+  as_tibble() |>
+  mutate(
+    Sales_norm = Total_Sales / mean(Total_Sales, na.rm = TRUE),
+    Series     = "Dept 10 - Total (sum over stores)"
+  ) |>
+  select(Week, Sales_norm, Series)
+
+combined_norm <- bind_rows(
+  item_10_10_norm,
+  store_10_norm,
+  dept_10_norm
+)
+
+# ── Plot: normalized series (overlay) ────────────────────────────────────────
+
+ggplot(combined_norm, aes(x = Week, y = Sales_norm, color = Series)) +
+  geom_line(linewidth = 0.7) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  scale_color_manual(values = c(
+    "Store 10 - Dept 10 (item)"          = "#1f77b4",
+    "Store 10 - Total (sum over depts)"  = "#ff7f0e",
+    "Dept 10 - Total (sum over stores)"  = "#2ca02c"
+  )) +
+  labs(
+    title    = "Normalized Weekly Sales (divided by own mean)",
+    subtitle = "Comparison of shapes: item vs store aggregate vs department aggregate",
+    y        = "Normalized sales (mean = 1)",
+    x        = "Week",
+    color    = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    plot.title      = element_text(face = "bold")
+  )
+
+# Faceted version (easier to compare individually)
+ggplot(combined_norm, aes(x = Week, y = Sales_norm)) +
+  geom_line(color = "#1f77b4", linewidth = 0.7) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey50") +
+  facet_wrap(~ Series, ncol = 1, scales = "free_y") +
+  labs(
+    title    = "Normalized Weekly Sales by Series (mean = 1)",
+    y        = "Normalized sales",
+    x        = NULL
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+We observe much clearer weekly seasonality at the store-total level than at the individual item level.
+
+- **Seasonality strength**: usually strongest at aggregate levels (store total).
+
+- **Noise level**: highest at item level, lowest at aggregates.
+
+- **Holiday effects**: often more visible/clear in aggregates
+
+This suggests that aggregating reduces noise and makes seasonal patterns more detectable → likely benefit for exponential smoothing methods.
+
+
+## Frequency analysis (periodogram / FFT)
+
+
+## STL decomposition (trend / seasonal / remainder)
+
+
+## Additive vs Multiplicative seasonality check
+
+
+## Stationarity assessment
+
+
+## Selection of aggregation levels (store / department groups)
+
+
+
+# Self-Coded Triple Exponential Smoothing
+
+- Implementation of TES (additive & multiplicative)
+
+- Initialization methods
+
+- Parameter optimization (grid search + optim)
+
+- Horizon-1 forecasting functions
+
+
+
+# Part I – Forecasting Comparison
+
+
+## Method 1: Direct forecasting at Store-Dept level
+
+
+## Method 2: Aggregate → Forecast → Proportional de-aggregation
+
+
+## Accuracy evaluation (WAPE, MAPE, MedAPE)
+
+
+## Comparison & conclusion
+
+
+# Part II – Rebate Optimization
+
+- Store-level weekly aggregation
+
+- Horizon-2 forecasting
+
+- Monthly ρ_m calculation
+
+- Modification strategy to increase qualifying months
+
+- Accuracy cost assessment
+
+# Appendix
+
+## Sensitivity analysis
+
+## Residual diagnostics
+
+
+
+
+
+
