@@ -367,23 +367,7 @@ We observe much clearer weekly seasonality at the store-total level than at the 
 
 - **Holiday effects**: often more visible/clear in aggregates
 
-This suggests that aggregating reduces noise and makes seasonal patterns more detectable → likely benefit for exponential smoothing methods.
-
-
-## Frequency analysis (periodogram / FFT)
-
-
-## STL decomposition (trend / seasonal / remainder)
-
-
-## Additive vs Multiplicative seasonality check
-
-
-## Stationarity assessment
-
-
-## Selection of aggregation levels (store / department groups)
-
+This suggests that aggregating reduces noise and makes seasonal patterns more detectable → likely a benefit for exponential smoothing methods.
 
 
 # Part I – Forecasting Comparison
@@ -640,18 +624,18 @@ cat("Best parameters (multiplicative) for Store 10 – Dept 10:\n")
 print(params_item_multi)
 ```
 - **α = 0.9** (level smoothing parameter)  
-Very high value → the model puts **strong weight on the most recent observation** when updating the level (smoothed baseline).  
-→ The level adapts **very quickly** to recent changes in the series.  
+  Very high value → the model puts **strong weight on the most recent observation** when updating the level (smoothed baseline).  
+  → The level adapts **very quickly** to recent changes in the series.  
 
-**β = 0.01** (trend smoothing parameter)  
-Extremely low value → the trend component is updated **very slowly** / almost not at all.  
-→ The model essentially treats the trend as **nearly constant** over time.  
-→ This is common when there is **little or no clear long-term trend** in the data, or when trend changes are very gradual.
+- **β = 0.01** (trend smoothing parameter)  
+  Extremely low value → the trend component is updated **very slowly** / almost not at all.  
+  → The model essentially treats the trend as **nearly constant** over time.  
+  → This is common when there is **little or no clear long-term trend** in the data, or when trend changes are very gradual.
 
-**γ = 0.1** (seasonal smoothing parameter)  
-Moderate-to-low value → the seasonal pattern is updated **slowly**.  
-→ The model trusts the **historical seasonal pattern quite strongly** and only makes small adjustments when new data arrives.  
-→ Suitable when seasonality is **stable over time** (which is often the case at aggregate levels in retail data).
+- **γ = 0.1** (seasonal smoothing parameter)  
+  Moderate-to-low value → the seasonal pattern is updated **slowly**.  
+  → The model trusts the **historical seasonal pattern quite strongly** and only makes small adjustments when new data arrives.  
+  → Suitable when seasonality is **stable over time** (which is often the case at aggregate levels in retail data).
 
 **Overall interpretation in context**  
 - The model is behaving almost like **simple exponential smoothing with a fixed seasonal pattern** (because β is extremely small and γ is low).  
@@ -778,7 +762,7 @@ store_series <- store_ts |>
 cat("Store 10 total series length:", nrow(store_series), "weeks\n")
 ```
 
-## Parameter Optimization
+### Parameter Optimization
 
 Multiplicative (stronger seasonality at aggregate level):
 
@@ -796,7 +780,7 @@ cat("\nBest parameters (additive):\n")
 print(params_store_add)
 ```
 
-## Rolling Horizon-1 Forecast
+### Rolling Horizon-1 Forecast
 
 Using multiplicative model:
 
@@ -812,7 +796,7 @@ fc_aggregate_multi <- rolling_h1_forecasts(
 ```
 
 
-## Proportional De-aggregation
+### Proportional De-aggregation
 
 We compare three de-aggregation strategies:
 
@@ -976,7 +960,7 @@ fc_aggregate_deagg <- deagg_results |>
   mutate(Error = Actual - Forecast)
 ```
 
-## Visual Check
+### Visual Check
 
 ```{r agg_visual_check}
 # Combine Method 1 (direct) and Method 2 (aggregate → de-agg with seasonal proportions)
@@ -1007,7 +991,7 @@ ggplot(comparison, aes(x = Week)) +
 ```
 
 
-## Accuracy Evaluation
+### Accuracy Evaluation
 
 ```{r agg_evaluation}
 accuracy_final <- comparison |>
